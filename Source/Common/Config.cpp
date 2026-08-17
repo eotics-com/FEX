@@ -482,6 +482,18 @@ ApplicationNames GetApplicationNames(const fextl::vector<fextl::string>& Args, b
 }
 
 void LoadConfig(fextl::string ProgramName, char** const envp, const PortableInformation& PortableInfo) {
+#ifdef __REACTOS__
+  FEXCore::Config::SetDataDirectory(".\\", false);
+  FEXCore::Config::SetDataDirectory(".\\", true);
+  FEXCore::Config::SetConfigDirectory(".\\", false);
+  FEXCore::Config::SetConfigDirectory(".\\", true);
+  FEXCore::Config::SetConfigFileLocation(".\\FEXConfig.json", false);
+  FEXCore::Config::SetConfigFileLocation(".\\FEXConfig.json", true);
+  FEXCore::Config::Initialize();
+  FEXCore::Config::AddLayer(CreateEnvironmentLayer(envp));
+  FEXCore::Config::Load();
+  return;
+#else
   const bool IsPortable = PortableInfo.IsPortable;
   FEX::Config::InitializeConfigs(PortableInfo);
   FEXCore::Config::Initialize();
@@ -522,6 +534,7 @@ void LoadConfig(fextl::string ProgramName, char** const envp, const PortableInfo
 
   FEXCore::Config::AddLayer(CreateEnvironmentLayer(envp));
   FEXCore::Config::Load();
+#endif
 }
 
 #ifndef _WIN32

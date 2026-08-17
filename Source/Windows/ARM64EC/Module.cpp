@@ -52,6 +52,9 @@ $end_info$
 #include <cstdio>
 #include <type_traits>
 #include <mutex>
+#ifdef __REACTOS__
+#include <new>
+#endif
 #include <optional>
 #include <unordered_map>
 #include <utility>
@@ -60,6 +63,12 @@ $end_info$
 #include <winternl.h>
 #include <winnt.h>
 #include <wine/debug.h>
+#ifdef __REACTOS__
+
+#ifndef STATUS_EXECUTABLE_MEMORY_WRITE
+#define STATUS_EXECUTABLE_MEMORY_WRITE ((NTSTATUS)0xC0000723L)
+#endif
+#endif
 
 namespace Exception {
 class ECSyscallHandler;
@@ -75,6 +84,10 @@ extern void* ExitFunctionSuspendResumePoint;
 
 void* X64ReturnInstr; // See Module.S
 uintptr_t NtDllBase;
+#ifdef __REACTOS__
+uintptr_t NtDllEnd;
+void* DefaultCheckCall;
+#endif
 
 // Exports on ARM64EC point to x64 fast forward sequences to allow for redirecting to the JIT if functions are hotpatched. This LUT is from their addresses to the relative addresses of the native code exports.
 uint32_t* NtDllRedirectionLUT;
@@ -98,8 +111,17 @@ struct ThreadCPUArea {
   static constexpr size_t TEBCPUAreaOffset = 0x1788;
   CHPE_V2_CPU_AREA_INFO* Area;
 
+#ifdef __REACTOS__
+  explicit ThreadCPUArea(_TEB* TEB)
+    : Area(TEB ? *reinterpret_cast<CHPE_V2_CPU_AREA_INFO**>(reinterpret_cast<uintptr_t>(TEB) + TEBCPUAreaOffset) : nullptr) {}
+
+  explicit operator bool() const {
+    return Area != nullptr;
+  }
+#else
   explicit ThreadCPUArea(_TEB* TEB)
     : Area(*reinterpret_cast<CHPE_V2_CPU_AREA_INFO**>(reinterpret_cast<uintptr_t>(TEB) + TEBCPUAreaOffset)) {}
+#endif
 
   uint64_t& EmulatorStackLimit() const {
     return Area->EmulatorStackLimit;
@@ -132,6 +154,9 @@ struct ThreadCPUArea {
 
 struct FrontendThreadData {
   bool InLockedRWXRead {};
+#ifdef __REACTOS__
+  uint64_t EmulatorStack {};
+#endif
 };
 
 namespace {
@@ -149,8 +174,16 @@ std::recursive_mutex ThreadCreationMutex;
 std::unordered_map<DWORD, FEXCore::Core::InternalThreadState*> Threads;
 
 std::pair<NTSTATUS, ThreadCPUArea> GetThreadCPUArea(HANDLE Thread) {
+#ifdef __REACTOS__
+  THREAD_BASIC_INFORMATION Info {};
+  const NTSTATUS Err = NtQueryInformationThread(Thread, ThreadBasicInformation, &Info, sizeof(Info), nullptr);
+  if (Err) {
+    return {Err, ThreadCPUArea(nullptr)};
+  }
+#else
   THREAD_BASIC_INFORMATION Info;
   const NTSTATUS Err = NtQueryInformationThread(Thread, ThreadBasicInformation, &Info, sizeof(Info), nullptr);
+#endif
   return {Err, ThreadCPUArea(reinterpret_cast<_TEB*>(Info.TebBaseAddress))};
 }
 
@@ -161,6 +194,24 @@ ThreadCPUArea GetCPUArea() {
 FrontendThreadData* GetFrontendThreadData(FEXCore::Core::InternalThreadState* Thread) {
   return static_cast<FrontendThreadData*>(Thread->FrontendPtr);
 }
+#ifdef __REACTOS__
+
+void DestroyThreadState(FEXCore::Core::InternalThreadState* Thread) {
+  auto* Frontend = GetFrontendThreadData(Thread);
+  const uint64_t EmulatorStack = Frontend ? Frontend->EmulatorStack : 0;
+
+  delete Frontend;
+
+  // GDT and LDT are mirrored, only free one.
+  delete[] Thread->CurrentFrame->State.segment_arrays[FEXCore::Core::CPUState::SEGMENT_ARRAY_INDEX_GDT];
+
+  FEX::Windows::CallRetStack::DestroyThread(Thread);
+  CTX->DestroyThread(Thread);
+  if (EmulatorStack) {
+    ::VirtualFree(reinterpret_cast<void*>(EmulatorStack), 0, MEM_RELEASE);
+  }
+}
+#endif
 
 bool IsEmulatorStackAddress(const ThreadCPUArea CPUArea, uint64_t Address) {
   return Address <= CPUArea.EmulatorStackBase() && Address >= CPUArea.EmulatorStackLimit();
@@ -176,15 +227,45 @@ void FillNtDllLUTs(HMODULE NtDll) {
   ULONG Size;
   const auto* LoadConfig =
     reinterpret_cast<_IMAGE_LOAD_CONFIG_DIRECTORY64*>(RtlImageDirectoryEntryToData(NtDll, true, IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG, &Size));
+#ifdef __REACTOS__
+
+  // ReactOS ntdll is pure ARM64 and carries no CHPE metadata / redirection table. Leave the LUT empty in that case.
+  if (!LoadConfig ||
+      Size < __builtin_offsetof(_IMAGE_LOAD_CONFIG_DIRECTORY64, CHPEMetadataPointer) + sizeof(LoadConfig->CHPEMetadataPointer) ||
+      !LoadConfig->CHPEMetadataPointer) {
+    NtDllRedirectionLUT = nullptr;
+    NtDllRedirectionLUTSize = 0;
+    return;
+  }
+
+#endif
   const auto* CHPEMetadata = reinterpret_cast<IMAGE_ARM64EC_METADATA*>(LoadConfig->CHPEMetadataPointer);
+#ifdef __REACTOS__
+
+  if (!CHPEMetadata->RedirectionMetadata || !CHPEMetadata->RedirectionMetadataCount) {
+    NtDllRedirectionLUT = nullptr;
+    NtDllRedirectionLUTSize = 0;
+    return;
+  }
+
+#endif
   const auto* RedirectionTableBegin = reinterpret_cast<IMAGE_ARM64EC_REDIRECTION_ENTRY*>(NtDllBase + CHPEMetadata->RedirectionMetadata);
   const auto* RedirectionTableEnd = RedirectionTableBegin + CHPEMetadata->RedirectionMetadataCount;
 
   NtDllRedirectionLUTSize = std::prev(RedirectionTableEnd)->Source + 1;
 
   SIZE_T AllocSize = NtDllRedirectionLUTSize * sizeof(uint32_t);
+#ifdef __REACTOS__
+  if (NtAllocateVirtualMemoryNative(NtCurrentProcess(), reinterpret_cast<void**>(&NtDllRedirectionLUT), 0, &AllocSize, MEM_COMMIT | MEM_RESERVE,
+                                    PAGE_READWRITE) < 0) {
+    NtDllRedirectionLUT = nullptr;
+    NtDllRedirectionLUTSize = 0;
+    return;
+  }
+#else
   NtAllocateVirtualMemoryNative(NtCurrentProcess(), reinterpret_cast<void**>(&NtDllRedirectionLUT), 0, &AllocSize, MEM_COMMIT | MEM_RESERVE,
                                 PAGE_READWRITE);
+#endif
   for (auto It = RedirectionTableBegin; It != RedirectionTableEnd; It++) {
     NtDllRedirectionLUT[It->Source] = It->Destination;
   }
@@ -199,10 +280,26 @@ void WriteModuleRVA(HMODULE Module, LONG RVA, T Data) {
   void* Address = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(Module) + RVA);
   void* ProtAddress = Address;
   SIZE_T ProtSize = sizeof(T);
+#ifdef __REACTOS__
+  // Nothing patches ntdll before FEX loads on ReactOS, so the regular export is safe here and does not depend on the
+  // parsed syscall ids being valid yet.
+  ULONG Prot {};
+  if (NtProtectVirtualMemory(NtCurrentProcess(), &ProtAddress, &ProtSize, PAGE_READWRITE, &Prot) < 0) {
+    return;
+  }
+
+  *reinterpret_cast<T*>(Address) = Data;
+
+  ProtAddress = Address;
+  ProtSize = sizeof(T);
+  ULONG Ignored;
+  NtProtectVirtualMemory(NtCurrentProcess(), &ProtAddress, &ProtSize, Prot, &Ignored);
+#else
   ULONG Prot;
   NtProtectVirtualMemoryNative(NtCurrentProcess(), &ProtAddress, &ProtSize, PAGE_READWRITE, &Prot);
   *reinterpret_cast<T*>(Address) = Data;
   NtProtectVirtualMemoryNative(NtCurrentProcess(), &ProtAddress, &ProtSize, Prot, nullptr);
+#endif
 }
 
 void PatchCallChecker() {
@@ -212,6 +309,13 @@ void PatchCallChecker() {
   const auto* LoadConfig =
     reinterpret_cast<_IMAGE_LOAD_CONFIG_DIRECTORY64*>(RtlImageDirectoryEntryToData(Module, true, IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG, &Size));
   const auto* CHPEMetadata = reinterpret_cast<IMAGE_ARM64EC_METADATA*>(LoadConfig->CHPEMetadataPointer);
+#ifdef __REACTOS__
+  // Remember the loader-installed call checker so CheckCall can fall back to it for non-ntdll targets.
+  const auto DefaultCheckCallSlot = reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(Module) + CHPEMetadata->__os_arm64x_dispatch_call);
+  if (*DefaultCheckCallSlot != &CheckCall) {
+    DefaultCheckCall = *DefaultCheckCallSlot;
+  }
+#endif
   WriteModuleRVA(Module, CHPEMetadata->__os_arm64x_dispatch_call, &CheckCall);
   WriteModuleRVA(Module, CHPEMetadata->__os_arm64x_dispatch_icall, &CheckCall);
   WriteModuleRVA(Module, CHPEMetadata->__os_arm64x_dispatch_icall_cfg, &CheckCall);
@@ -260,6 +364,18 @@ void ParseWineSyscallNumbers(HMODULE NtDll) {
     }
   }
 }
+#ifdef __REACTOS__
+
+// ReactOS ARM64 syscall stubs are `movz x8, #id; svc #0; ret`.
+uint64_t ParseReactOSSyscallNumber(HMODULE NtDll, const char* Name) {
+  const auto* Stub = reinterpret_cast<const uint32_t*>(GetProcAddress(NtDll, Name));
+  if (!Stub || ((*Stub & 0xFFE0001F) != 0xD2800008)) {
+    return ~0ULL;
+  }
+
+  return (*Stub >> 5) & 0xFFFF;
+}
+#endif
 
 // Syscall thunks may have been patched before FEX has loaded, the default call checker installed by ntdll into FEX will
 // try to invoke the JIT when calling such patched syscalls but this obviously doesn't work before FEX is initalised.
@@ -270,6 +386,13 @@ void InitSyscalls() {
   // software so are safe to call, but if that changes the loader structures in the PEB could be parsed manually.
   const auto NtDll = GetModuleHandleW(L"ntdll.dll");
   NtDllBase = reinterpret_cast<uintptr_t>(NtDll);
+#ifdef __REACTOS__
+
+  NtDllEnd = NtDllBase + RtlImageNtHeader(NtDll)->OptionalHeader.SizeOfImage;
+  WineNtContinueSyscallId = ParseReactOSSyscallNumber(NtDll, "ZwContinue");
+  WineNtAllocateVirtualMemorySyscallId = ParseReactOSSyscallNumber(NtDll, "ZwAllocateVirtualMemory");
+  WineNtProtectVirtualMemorySyscallId = ParseReactOSSyscallNumber(NtDll, "ZwProtectVirtualMemory");
+#endif
 
   const auto WineSyscallDispatcherPtr = reinterpret_cast<void**>(GetProcAddress(NtDll, "__wine_syscall_dispatcher"));
   if (WineSyscallDispatcherPtr) {
@@ -584,7 +707,9 @@ NTSTATUS ProcessInit() {
   const auto ExecutablePath = FEX::Windows::GetExecutableFilePath();
   const auto ExecutableName = FEX::Windows::BaseName(ExecutablePath);
   FEX::Config::LoadConfig(fextl::string {ExecutableName}, _environ, FEX::ReadPortabilityInformation());
+#ifndef __REACTOS__
   FEXCore::Config::ReloadMetaLayer();
+#endif
   FEX::Windows::Logging::Init();
   FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_FILENAME, ExecutablePath);
   FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_CONFIG_NAME, ExecutableName);
@@ -609,10 +734,22 @@ NTSTATUS ProcessInit() {
     auto HostFeatures = FEX::Windows::CPUFeatures::FetchHostFeatures(IsWine, FEXCore::HostFeatures::HostTypeEnum::Arm64ec);
     CTX = FEXCore::Context::Context::CreateNewContext(HostFeatures);
   }
+#ifdef __REACTOS__
+
+  if (!CTX) {
+    return STATUS_NO_MEMORY;
+  }
+#endif
 
   CTX->SetSignalDelegator(SignalDelegator.get());
   CTX->SetSyscallHandler(SyscallHandler.get());
+#ifdef __REACTOS__
+  if (!CTX->InitCore()) {
+    return STATUS_UNSUCCESSFUL;
+  }
+#else
   CTX->InitCore();
+#endif
   Exception::HandlerConfig.emplace(*CTX);
   InvalidationTracker.emplace(*CTX, Threads);
   ImageTracker.emplace(*CTX, false);
@@ -624,13 +761,43 @@ NTSTATUS ProcessInit() {
 
   CPUFeatures.emplace(*CTX);
 
+#ifdef __REACTOS__
+  // With kernel-managed executable writes enabled by the tracker, writing into a fresh RWX page would trap before any
+  // thread state exists. Fill the page while it is RW, then make it RX.
+  X64ReturnInstr = ::VirtualAlloc(nullptr, FEXCore::Utils::FEX_PAGE_SIZE, MEM_COMMIT | MEM_TOP_DOWN, PAGE_READWRITE);
+  if (!X64ReturnInstr) {
+    return STATUS_NO_MEMORY;
+  }
+  *reinterpret_cast<uint8_t*>(X64ReturnInstr) = 0xc3;
+  DWORD OldProtection;
+  if (!::VirtualProtect(X64ReturnInstr, FEXCore::Utils::FEX_PAGE_SIZE, PAGE_EXECUTE_READ, &OldProtection)) {
+    return STATUS_UNSUCCESSFUL;
+  }
+  ::FlushInstructionCache(GetCurrentProcess(), X64ReturnInstr, 1);
+  InvalidationTracker->HandleMemoryProtectionNotification(reinterpret_cast<uint64_t>(X64ReturnInstr), FEXCore::Utils::FEX_PAGE_SIZE,
+                                                          PAGE_EXECUTE_READ);
+#else
   X64ReturnInstr = ::VirtualAlloc(nullptr, FEXCore::Utils::FEX_PAGE_SIZE, MEM_COMMIT | MEM_TOP_DOWN, PAGE_EXECUTE_READWRITE);
   InvalidationTracker->HandleMemoryProtectionNotification(reinterpret_cast<uint64_t>(X64ReturnInstr), FEXCore::Utils::FEX_PAGE_SIZE,
                                                           PAGE_EXECUTE_READ);
   *reinterpret_cast<uint8_t*>(X64ReturnInstr) = 0xc3;
+#endif
 
   const uintptr_t KiUserExceptionDispatcherFFS = reinterpret_cast<uintptr_t>(GetProcAddress(NtDll, "KiUserExceptionDispatcher"));
+#ifdef __REACTOS__
+  if (!KiUserExceptionDispatcherFFS) {
+    return STATUS_ENTRYPOINT_NOT_FOUND;
+  }
+  // Pure ARM64 ntdll has no redirection LUT; the export itself is the native dispatcher then.
+  const uintptr_t KiUserExceptionDispatcherRVA = KiUserExceptionDispatcherFFS - NtDllBase;
+  if (NtDllRedirectionLUT && KiUserExceptionDispatcherRVA < NtDllRedirectionLUTSize) {
+    Exception::KiUserExceptionDispatcher = NtDllRedirectionLUT[KiUserExceptionDispatcherRVA] + NtDllBase;
+  } else {
+    Exception::KiUserExceptionDispatcher = KiUserExceptionDispatcherFFS;
+  }
+#else
   Exception::KiUserExceptionDispatcher = NtDllRedirectionLUT[KiUserExceptionDispatcherFFS - NtDllBase] + NtDllBase;
+#endif
 
   FEX_CONFIG_OPT(ProfileStats, PROFILESTATS);
   FEX_CONFIG_OPT(StartupSleep, STARTUPSLEEP);
@@ -681,8 +848,16 @@ bool ResetToConsistentStateImpl(const ThreadCPUArea CPUArea, EXCEPTION_RECORD* E
     return true;
   }
 
+#ifdef __REACTOS__
+  // Kernel-managed executable writes surface as STATUS_IN_PAGE_ERROR carrying STATUS_EXECUTABLE_MEMORY_WRITE.
+  const bool ManagedExecutableWrite = Exception->ExceptionCode == STATUS_IN_PAGE_ERROR && Exception->NumberParameters == 3 && Exception->ExceptionInformation[0] == 1 && Exception->ExceptionInformation[2] == static_cast<ULONG_PTR>(STATUS_EXECUTABLE_MEMORY_WRITE);
+  const uint64_t FaultAddress = Exception->NumberParameters > 1 ? static_cast<uint64_t>(Exception->ExceptionInformation[1]) : 0;
+
+  if (Exception->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
+#else
   if (Exception->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
     const auto FaultAddress = static_cast<uint64_t>(Exception->ExceptionInformation[1]);
+#endif
 
     if (FEX::Windows::CallRetStack::HandleAccessViolation(Thread, FaultAddress, NativeContext->X17)) {
       return true;
@@ -693,6 +868,11 @@ bool ResetToConsistentStateImpl(const ThreadCPUArea CPUArea, EXCEPTION_RECORD* E
       return true;
     }
 
+#ifdef __REACTOS__
+  }
+
+  if (Exception->ExceptionCode == EXCEPTION_ACCESS_VIOLATION || ManagedExecutableWrite) {
+#endif
     std::scoped_lock Lock(ThreadCreationMutex);
     if (InvalidationTracker && InvalidationTracker->HandleRWXAccessViolation(Thread, NativeContext->Pc, FaultAddress)) {
       FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedSMCCount, 1);
@@ -882,6 +1062,10 @@ void BTCpu64NotifyMemoryDirty(void* Address, SIZE_T Size) {
 
   std::scoped_lock Lock(ThreadCreationMutex);
   InvalidationTracker->InvalidateAlignedInterval(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), false);
+#ifdef __REACTOS__
+  // A cross-process write leaves the pages dirty (untracked); re-arm write tracking for any RWX intervals in the range.
+  InvalidationTracker->ReprotectRWXIntervals(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size));
+#endif
 }
 
 void BTCpu64NotifyReadFile(HANDLE Handle, void* Address, SIZE_T Size, BOOL After, NTSTATUS Status) {
@@ -903,6 +1087,9 @@ void BTCpu64NotifyReadFile(HANDLE Handle, void* Address, SIZE_T Size, BOOL After
   } else {
     if (InLockedRWXRead) {
       InLockedRWXRead = false;
+#ifdef __REACTOS__
+      InvalidationTracker->EndUntrackedWriteLocked(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size));
+#endif
       CTX->GetCodeInvalidationMutex().unlock();
       ThreadCreationMutex.unlock();
     }
@@ -913,18 +1100,50 @@ NTSTATUS ThreadInit() {
   std::scoped_lock Lock(ThreadCreationMutex);
   FEX::Windows::InitCRTThread();
   const auto CPUArea = GetCPUArea();
+#ifdef __REACTOS__
+
+  if (!CPUArea || !CTX) {
+    FEX::Windows::DeinitCRTThread();
+    return STATUS_UNSUCCESSFUL;
+  }
+#endif
 
   static constexpr size_t EmulatorStackSize = 0x40000;
   const uint64_t EmulatorStack =
     reinterpret_cast<uint64_t>(::VirtualAlloc(nullptr, EmulatorStackSize, MEM_COMMIT | MEM_RESERVE | MEM_TOP_DOWN, PAGE_READWRITE));
+#ifdef __REACTOS__
+  // The CPU area is only published once the thread state is fully constructed (see below).
+  if (!EmulatorStack) {
+    FEX::Windows::DeinitCRTThread();
+    return STATUS_NO_MEMORY;
+  }
+#else
   CPUArea.EmulatorStackLimit() = EmulatorStack;
   CPUArea.EmulatorStackBase() = EmulatorStack + EmulatorStackSize;
+#endif
 
   auto* Thread = CTX->CreateThread(0, 0);
+#ifdef __REACTOS__
+  if (!Thread) {
+    ::VirtualFree(reinterpret_cast<void*>(EmulatorStack), 0, MEM_RELEASE);
+    FEX::Windows::DeinitCRTThread();
+    return STATUS_NO_MEMORY;
+  }
+#endif
 
   // Default segment setup.
   auto Frame = Thread->CurrentFrame;
+#ifdef __REACTOS__
+  auto NewSegments = new (std::nothrow) FEXCore::Core::CPUState::gdt_segment[32]();
+  if (!NewSegments) {
+    CTX->DestroyThread(Thread);
+    ::VirtualFree(reinterpret_cast<void*>(EmulatorStack), 0, MEM_RELEASE);
+    FEX::Windows::DeinitCRTThread();
+    return STATUS_NO_MEMORY;
+  }
+#else
   auto NewSegments = new FEXCore::Core::CPUState::gdt_segment[32];
+#endif
 
   // Setup initial code-segment GDT
   auto& GDT = NewSegments[FEXCore::Core::CPUState::DEFAULT_USER_CS];
@@ -942,13 +1161,19 @@ NTSTATUS ThreadInit() {
 
   FEX::Windows::CallRetStack::InitializeThread(Thread);
   Thread->CurrentFrame->Pointers.ExitFunctionEC = reinterpret_cast<uintptr_t>(&ExitFunctionEC);
+#ifndef __REACTOS__
   CPUArea.StateFrame() = Thread->CurrentFrame;
+#endif
 
   uint64_t EnterEC = Thread->CurrentFrame->Pointers.DispatcherLoopTopEnterEC;
+#ifndef __REACTOS__
   CPUArea.DispatcherLoopTopEnterEC() = EnterEC;
+#endif
 
   uint64_t EnterECFillSRA = Thread->CurrentFrame->Pointers.DispatcherLoopTopEnterECFillSRA;
+#ifndef __REACTOS__
   CPUArea.DispatcherLoopTopEnterECFillSRA() = EnterECFillSRA;
+#endif
 
   CPUArea.ContextAmd64() = {.ContextFlags = CONTEXT_CONTROL | CONTEXT_SEGMENTS | CONTEXT_INTEGER | CONTEXT_FLOATING_POINT,
                             .AMD64_SegCs = (FEXCore::Core::CPUState::DEFAULT_USER_CS << 3) | 3,
@@ -963,17 +1188,46 @@ NTSTATUS ThreadInit() {
                             .AMD64_ControlWord = 0x27f};
   Exception::LoadStateFromECContext(Thread, CPUArea.ContextAmd64().AMD64_Context);
 
+#ifdef __REACTOS__
+  Thread->FrontendPtr = new (std::nothrow) FrontendThreadData {.EmulatorStack = EmulatorStack};
+  if (!Thread->FrontendPtr) {
+    delete[] NewSegments;
+    FEX::Windows::CallRetStack::DestroyThread(Thread);
+    CTX->DestroyThread(Thread);
+    ::VirtualFree(reinterpret_cast<void*>(EmulatorStack), 0, MEM_RELEASE);
+    FEX::Windows::DeinitCRTThread();
+    return STATUS_NO_MEMORY;
+  }
+#else
   Thread->FrontendPtr = new FrontendThreadData();
+#endif
 
   {
     auto ThreadTID = GetCurrentThreadId();
+#ifdef __REACTOS__
+    if (!Threads.emplace(ThreadTID, Thread).second) {
+      DestroyThreadState(Thread);
+      FEX::Windows::DeinitCRTThread();
+      return STATUS_OBJECT_NAME_COLLISION;
+    }
+#else
     Threads.emplace(ThreadTID, Thread);
+#endif
     if (StatAllocHandler) {
       Thread->ThreadStats = StatAllocHandler->AllocateSlot(ThreadTID);
     }
   }
 
+#ifdef __REACTOS__
+  CPUArea.EmulatorStackLimit() = EmulatorStack;
+  CPUArea.EmulatorStackBase() = EmulatorStack + EmulatorStackSize;
+  CPUArea.StateFrame() = Thread->CurrentFrame;
+#endif
   CPUArea.ThreadState() = Thread;
+#ifdef __REACTOS__
+  CPUArea.DispatcherLoopTopEnterEC() = EnterEC;
+  CPUArea.DispatcherLoopTopEnterECFillSRA() = EnterECFillSRA;
+#endif
   CPUArea.Area->SuspendDoorbell = reinterpret_cast<ULONG*>(&Thread->CurrentFrame->SuspendDoorbell);
   return STATUS_SUCCESS;
 }
@@ -984,6 +1238,11 @@ NTSTATUS ThreadTerm(HANDLE Thread, LONG ExitCode) {
   }
 
   auto ThreadDup = FEX::Windows::DupHandle(Thread, THREAD_QUERY_INFORMATION | THREAD_SUSPEND_RESUME);
+#ifdef __REACTOS__
+  if (!ThreadDup) {
+    return STATUS_ACCESS_DENIED;
+  }
+#endif
 
   THREAD_BASIC_INFORMATION Info;
   if (auto Err = NtQueryInformationThread(*ThreadDup, ThreadBasicInformation, &Info, sizeof(Info), nullptr); Err) {
@@ -992,6 +1251,65 @@ NTSTATUS ThreadTerm(HANDLE Thread, LONG ExitCode) {
 
   const auto ThreadTID = reinterpret_cast<uint64_t>(Info.ClientId.UniqueThread);
   bool Self = ThreadTID == GetCurrentThreadId();
+#ifdef __REACTOS__
+  bool Suspended = false;
+  if (!Self) {
+    // If we are suspending a thread that isn't ourselves, try to suspend it first so we know internal JIT locks aren't being held.
+    if (auto Err = NtSuspendThread(*ThreadDup, nullptr); Err) {
+      return Err;
+    }
+    Suspended = true;
+
+    CONTEXT TmpContext {
+      .ContextFlags = CONTEXT_INTEGER,
+    };
+
+    // NtSuspendThread may return before the thread has stopped. Synchronize before destroying its JIT state.
+    if (auto Err = NtGetContextThread(*ThreadDup, &TmpContext); Err) {
+      NtResumeThread(*ThreadDup, nullptr);
+      return Err;
+    }
+  }
+
+  const auto [CPUAreaStatus, CPUArea] = GetThreadCPUArea(*ThreadDup);
+  FEXCore::Core::InternalThreadState* ThreadState {};
+  NTSTATUS CleanupStatus = STATUS_SUCCESS;
+
+  {
+    std::scoped_lock Lock(ThreadCreationMutex);
+    auto it = Threads.find(ThreadTID);
+    if (it != Threads.end()) {
+      if (CPUAreaStatus) {
+        CleanupStatus = CPUAreaStatus;
+      } else if (!CPUArea || CPUArea.ThreadState() != it->second) {
+        CleanupStatus = STATUS_UNSUCCESSFUL;
+      } else {
+        ThreadState = it->second;
+        Threads.erase(it);
+        if (StatAllocHandler) {
+          StatAllocHandler->DeallocateSlot(ThreadState->ThreadStats);
+        }
+      }
+    }
+  }
+
+  if (!ThreadState) {
+    if (Suspended) {
+      NtResumeThread(*ThreadDup, nullptr);
+    }
+    return CleanupStatus;
+  }
+
+  CPUArea.Area->SuspendDoorbell = nullptr;
+  CPUArea.StateFrame() = nullptr;
+  CPUArea.ThreadState() = nullptr;
+  CPUArea.DispatcherLoopTopEnterEC() = 0;
+  CPUArea.DispatcherLoopTopEnterECFillSRA() = 0;
+  CPUArea.EmulatorStackLimit() = 0;
+  CPUArea.EmulatorStackBase() = 0;
+
+  DestroyThreadState(ThreadState);
+#else
   if (!Self) {
     CONTEXT TmpContext;
     // If we are suspending a thread that isn't ourselves, try to suspend it first so we know internal JIT locks aren't being held.
@@ -1028,6 +1346,7 @@ NTSTATUS ThreadTerm(HANDLE Thread, LONG ExitCode) {
   FEX::Windows::CallRetStack::DestroyThread(ThreadState);
   CTX->DestroyThread(ThreadState);
   ::VirtualFree(reinterpret_cast<void*>(CPUArea.EmulatorStackLimit()), 0, MEM_RELEASE);
+#endif
   if (ThreadTID == GetCurrentThreadId()) {
     FEX::Windows::DeinitCRTThread();
   }

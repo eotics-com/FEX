@@ -1,8 +1,14 @@
 function(build_implib name)
   set(name_ex ${name}_ex)
+  set(dlltool_machine_args)
+  if (REACTOS AND ARCHITECTURE_arm64ec)
+    # ReactOS passes a generic llvm-dlltool rather than the arm64ec-w64-mingw32 wrapper.
+    list(APPEND dlltool_machine_args -m arm64ec)
+  endif()
+
   add_custom_target(${name_ex}lib ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/lib${name_ex}.a)
   add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/lib${name_ex}.a
-    COMMAND ${CMAKE_DLLTOOL} -d ${CMAKE_CURRENT_SOURCE_DIR}/Defs/${name}.def -k -l lib${name_ex}.a
+    COMMAND ${CMAKE_DLLTOOL} ${dlltool_machine_args} -d ${CMAKE_CURRENT_SOURCE_DIR}/Defs/${name}.def -k -l lib${name_ex}.a
     COMMENT "Building lib${name_ex}.a")
 
   add_library(${name_ex} SHARED IMPORTED)

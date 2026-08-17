@@ -7,6 +7,10 @@
 #include <shared_mutex>
 #include <unordered_map>
 #include <string_view>
+#ifdef __REACTOS__
+#include <ntstatus.h>
+#include <winternl.h>
+#endif
 
 namespace FEXCore::Core {
 struct InternalThreadState;
@@ -38,6 +42,10 @@ public:
   // Unprotects any RWX intervals in the input interval and invalidates code
   // NOTE: CodeInvalidationMutex must be locked when calling this, and if true is returned, kept locked until the write ends.
   bool BeginUntrackedWriteLocked(uint64_t Address, uint64_t Size);
+#ifdef __REACTOS__
+  // Re-arms kernel executable-write tracking after an untracked write. Only meaningful for managed executable writes.
+  void EndUntrackedWriteLocked(uint64_t Address, uint64_t Size);
+#endif
 
   FEXCore::HLE::ExecutableRangeInfo QueryExecutableRange(uint64_t Address);
 
@@ -47,6 +55,10 @@ private:
   void InvalidateIntervalInternal(uint64_t Address, uint64_t Size);
   // NOTE: This assumed CodeInvalidationMutex is locked by the caller
   void InvalidateIntervalInternalLocked(uint64_t Address, uint64_t Size);
+#ifdef __REACTOS__
+  NTSTATUS ResetExecutableWriteTracking(uint64_t Address, uint64_t Size);
+  NTSTATUS SetThreadExecutableWrites(bool AllowWrites);
+#endif
 
   // NOTE: If ForWriteLocked is true then this assumes CodeInvalidationMutex is locked by the caller,
   // and any code in the range will be invalidated before protection as RWX, otherwise protects as RX if false.
@@ -64,6 +76,11 @@ private:
   FEXCore::Context::Context& CTX;
   const std::unordered_map<DWORD, FEXCore::Core::InternalThreadState*>& Threads;
   bool SMCDetectionDisabled {false};                    // Protected by IntervalsLock
+#ifdef __REACTOS__
+  // Kernel-managed executable-write tracking (ProcessManageWritesToExecutableMemory) replaces RX/RWX reprotection
+  // for pages that are executable at the OS level. DEP-promoted intervals still use protection changes.
+  bool ManagedExecutableWrites {false};
+#endif
   bool DEPDisabled {false};                             // Protected by IntervalsLock
   FEXCore::IntervalList<uint64_t> DEPPromotedIntervals; // Protected by IntervalsLock
 

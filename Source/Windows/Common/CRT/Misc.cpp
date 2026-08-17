@@ -51,6 +51,7 @@ void InitEnv() {
 __attribute__((used, section(".CRT$FEXB"))) void (*_InitEnv)(void) = InitEnv;
 } // namespace
 
+#ifndef __REACTOS__
 DLLEXPORT_FUNC(char***, __p__environ, ()) {
   return &EnvArray;
 }
@@ -72,11 +73,13 @@ char* getenv(const char* VarName) {
 
   return Ret;
 }
+#endif
 
 int atexit(void (*)(void)) {
   return 0;
 }
 
+#ifndef __REACTOS__
 #pragma push_macro("abort")
 #undef abort
 void abort(void) {
@@ -87,14 +90,17 @@ void abort(void) {
 int getpid(void) {
   return static_cast<int>(GetCurrentProcessId());
 }
+#endif
 
 void exit(int _Code) {
   UNIMPLEMENTED();
 }
 
+#ifndef __REACTOS__
 DLLEXPORT_FUNC(void, _assert, (const char* message, const char* file, unsigned line)) {
   UNIMPLEMENTED();
 }
+#endif
 
 DLLEXPORT_FUNC(
   uintptr_t, _beginthreadex,
@@ -102,6 +108,8 @@ DLLEXPORT_FUNC(
   UNIMPLEMENTED();
 }
 
+#ifndef __REACTOS__
 DLLEXPORT_FUNC(int*, __sys_nerr, (void)) {
   UNIMPLEMENTED();
 }
+#endif

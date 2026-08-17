@@ -11,11 +11,49 @@
 #include <winternl.h>
 
 namespace FEX::Windows {
+#ifdef __REACTOS__
+namespace {
+constexpr ULONG ProcessManageWritesToExecutableMemory = 83;
+constexpr ULONG ThreadManageWritesToExecutableMemory = 48;
+constexpr ULONG VmPageDirtyStateInformation = 3;
+
+struct ManageWritesToExecutableMemory {
+  ULONG Version : 8;
+  ULONG ProcessEnableWriteExceptions : 1;
+  ULONG ThreadAllowWrites : 1;
+  ULONG Spare : 22;
+  PVOID KernelWriteToExecutableSignal;
+};
+
+struct MemoryRangeEntry {
+  PVOID VirtualAddress;
+  SIZE_T NumberOfBytes;
+};
+
+using NtSetInformationVirtualMemoryFn = NTSTATUS(WINAPI*)(HANDLE, ULONG, ULONG_PTR, MemoryRangeEntry*, PVOID, ULONG);
+NtSetInformationVirtualMemoryFn NtSetInformationVirtualMemoryPtr;
+
+NTSTATUS SetProcessExecutableWriteExceptions(bool Enable) {
+  ManageWritesToExecutableMemory Information {};
+  Information.Version = 2;
+  Information.ProcessEnableWriteExceptions = Enable;
+  return NtSetInformationProcess(NtCurrentProcess(), static_cast<PROCESSINFOCLASS>(ProcessManageWritesToExecutableMemory), &Information, sizeof(Information));
+}
+} // namespace
+
+#endif
 InvalidationTracker::InvalidationTracker(FEXCore::Context::Context& CTX, const std::unordered_map<DWORD, FEXCore::Core::InternalThreadState*>& Threads)
   : CTX {CTX}
   , Threads {Threads} {
   FEX_CONFIG_OPT(SMCChecks, SMCCHECKS);
   SMCDetectionDisabled = (SMCChecks == FEXCore::Config::CONFIG_SMC_NONE);
+#ifdef __REACTOS__
+
+  if (!SMCDetectionDisabled) {
+    const auto Ntdll = GetModuleHandleW(L"ntdll.dll");
+    NtSetInformationVirtualMemoryPtr = Ntdll ? reinterpret_cast<NtSetInformationVirtualMemoryFn>(GetProcAddress(Ntdll, "NtSetInformationVirtualMemory")) : nullptr;
+  }
+#endif
 
   MEMORY_BASIC_INFORMATION Info;
   uint64_t Address = 0;
@@ -28,6 +66,12 @@ InvalidationTracker::InvalidationTracker(FEXCore::Context::Context& CTX, const s
 
     Address = BaseAddress + Info.RegionSize;
   }
+#ifdef __REACTOS__
+
+  // FEX's dispatcher and initial host code buffer exist before the tracker. Leave those native EC mappings writable;
+  // managed dirty-state tracking is for guest executable memory registered below and after process initialization.
+  ManagedExecutableWrites = NtSetInformationVirtualMemoryPtr && SetProcessExecutableWriteExceptions(true) == STATUS_SUCCESS;
+#endif
 }
 
 static bool ProtHasExec(ULONG Prot) {
@@ -47,6 +91,9 @@ void InvalidationTracker::HandleMemoryProtectionNotification(uint64_t Address, u
   const auto AlignedBase = Address & FEXCore::Utils::FEX_PAGE_MASK;
   const auto AlignedSize = (Address - AlignedBase + Size + FEXCore::Utils::FEX_PAGE_SIZE - 1) & FEXCore::Utils::FEX_PAGE_MASK;
 
+#ifdef __REACTOS__
+  bool NeedsReprotect {};
+#endif
   const bool NeedsInvalidate = [&]() {
     std::unique_lock Lock(IntervalsLock);
 
@@ -61,6 +108,10 @@ void InvalidationTracker::HandleMemoryProtectionNotification(uint64_t Address, u
       if (EffectiveRWX) {
         LogMan::Msg::DFmt("Add SMC interval: {:X} - {:X}", AlignedBase, AlignedBase + AlignedSize);
         RWXIntervals.Insert(ProtInterval);
+#ifdef __REACTOS__
+        // Kernel write tracking only covers pages that are executable at the OS level, not DEP-promoted RW regions.
+        NeedsReprotect = HasExec;
+#endif
       }
       if (DEPDisabled && !HasExec) {
         DEPPromotedIntervals.Insert(ProtInterval);
@@ -82,6 +133,14 @@ void InvalidationTracker::HandleMemoryProtectionNotification(uint64_t Address, u
     // IntervalsLock cannot be held during invalidation
     InvalidateIntervalInternal(AlignedBase, AlignedSize);
   }
+#ifdef __REACTOS__
+  if (NeedsReprotect && ManagedExecutableWrites) {
+    const auto Status = ResetExecutableWriteTracking(AlignedBase, AlignedSize);
+    if (Status != STATUS_SUCCESS) {
+      LogMan::Msg::EFmt("Failed to track executable writes for {:X}-{:X}: {:X}", AlignedBase, AlignedBase + AlignedSize, static_cast<uint32_t>(Status));
+    }
+  }
+#endif
 }
 
 void InvalidationTracker::HandleProcessExecuteFlagsChange(ULONG Flags) {
@@ -139,6 +198,28 @@ void InvalidationTracker::HandleImageMap(std::string_view Name, uint64_t Address
 
   for (auto* Section = SectionsBegin; Section != SectionsEnd; Section++) {
     if (Section->Characteristics & IMAGE_SCN_MEM_EXECUTE) {
+#ifdef __REACTOS__
+      const uint64_t SectionBase = Address + Section->VirtualAddress;
+      const uint64_t SectionSize = Section->Misc.VirtualSize;
+      const uint64_t SectionEnd = SectionBase + SectionSize;
+      const bool Writable = Section->Characteristics & IMAGE_SCN_MEM_WRITE;
+      {
+        std::unique_lock Lock(IntervalsLock);
+        XIntervals.Insert({SectionBase, SectionEnd});
+        LastExecutableSectionEnd = std::max(LastExecutableSectionEnd, SectionEnd);
+        if (Writable) {
+          LogMan::Msg::DFmt("Add image SMC interval: {:X} - {:X}", SectionBase, SectionEnd);
+          RWXIntervals.Insert({SectionBase, SectionEnd});
+        }
+      }
+      // Re-arm outside IntervalsLock; the kernel call must not be made while blocking interval readers.
+      if (Writable && ManagedExecutableWrites) {
+        const auto Status = ResetExecutableWriteTracking(SectionBase, SectionSize);
+        if (Status != STATUS_SUCCESS) {
+          LogMan::Msg::EFmt("Failed to track executable image writes for {:X}-{:X}: {:X}", SectionBase, SectionEnd, static_cast<uint32_t>(Status));
+        }
+      }
+#else
       std::unique_lock Lock(IntervalsLock);
 
       uint64_t SectionBase = Address + Section->VirtualAddress;
@@ -149,6 +230,7 @@ void InvalidationTracker::HandleImageMap(std::string_view Name, uint64_t Address
         LogMan::Msg::DFmt("Add image SMC interval: {:X} - {:X}", SectionBase, SectionBase + Section->Misc.VirtualSize);
         RWXIntervals.Insert({SectionBase, SectionBase + Section->Misc.VirtualSize});
       }
+#endif
     }
   }
 
@@ -233,10 +315,34 @@ bool InvalidationTracker::HandleRWXAccessViolation(FEXCore::Core::InternalThread
       InvalidateIntervalInternalLocked(FaultAddress & FEXCore::Utils::FEX_PAGE_MASK, FEXCore::Utils::FEX_PAGE_SIZE);
 
       // Invalidate, then unprotect the faulting page with the compilation lock held to ensure that any racing invalidations are not dropped.
+#ifdef __REACTOS__
+      // Managed executable writes: let this thread perform the write once so the kernel marks the page dirty (writable) again.
+      // DEP-promoted pages are not executable at the OS level and keep using protection changes.
+      if (ManagedExecutableWrites && UntrapProt == PAGE_EXECUTE_READWRITE) {
+        auto Status = SetThreadExecutableWrites(true);
+        if (Status != STATUS_SUCCESS) {
+          LogMan::Msg::EFmt("Failed to allow an executable write at {:X}: {:X}", FaultAddress, static_cast<uint32_t>(Status));
+          return false;
+        }
+        auto* FaultByte = reinterpret_cast<volatile uint8_t*>(FaultAddress);
+        *FaultByte = *FaultByte;
+        Status = SetThreadExecutableWrites(false);
+        if (Status != STATUS_SUCCESS) {
+          LogMan::Msg::EFmt("Failed to restore executable-write tracking at {:X}: {:X}", FaultAddress, static_cast<uint32_t>(Status));
+          return false;
+        }
+      } else {
+        ULONG TmpProt;
+        void* TmpAddress = reinterpret_cast<void*>(FaultAddress);
+        SIZE_T TmpSize = 1;
+        NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, UntrapProt, &TmpProt);
+      }
+#else
       ULONG TmpProt;
       void* TmpAddress = reinterpret_cast<void*>(FaultAddress);
       SIZE_T TmpSize = 1;
       NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, UntrapProt, &TmpProt);
+#endif
     }
     DetectMonoBackpatcherBlock(Thread, HostPc);
     return true;
@@ -247,6 +353,30 @@ bool InvalidationTracker::HandleRWXAccessViolation(FEXCore::Core::InternalThread
 bool InvalidationTracker::BeginUntrackedWriteLocked(uint64_t Address, uint64_t Size) {
   return ProtectRWXIntervalsInternal(Address, Size, true);
 }
+#ifdef __REACTOS__
+
+void InvalidationTracker::EndUntrackedWriteLocked(uint64_t Address, uint64_t Size) {
+  if (ManagedExecutableWrites) {
+    ProtectRWXIntervalsInternal(Address, Size, false);
+  }
+}
+
+NTSTATUS InvalidationTracker::ResetExecutableWriteTracking(uint64_t Address, uint64_t Size) {
+  if (!NtSetInformationVirtualMemoryPtr || !Size) {
+    return STATUS_INVALID_PARAMETER;
+  }
+  MemoryRangeEntry Range {reinterpret_cast<PVOID>(Address), static_cast<SIZE_T>(Size)};
+  ULONG Flag {};
+  return NtSetInformationVirtualMemoryPtr(NtCurrentProcess(), VmPageDirtyStateInformation, 1, &Range, &Flag, sizeof(Flag));
+}
+
+NTSTATUS InvalidationTracker::SetThreadExecutableWrites(bool AllowWrites) {
+  ManageWritesToExecutableMemory Information {};
+  Information.Version = 2;
+  Information.ThreadAllowWrites = AllowWrites;
+  return NtSetInformationThread(NtCurrentThread(), static_cast<THREADINFOCLASS>(ThreadManageWritesToExecutableMemory), &Information, sizeof(Information));
+}
+#endif
 
 FEXCore::HLE::ExecutableRangeInfo InvalidationTracker::QueryExecutableRange(uint64_t Address) {
   std::shared_lock Lock(IntervalsLock);
@@ -295,6 +425,14 @@ void InvalidationTracker::DetectMonoBackpatcherBlock(FEXCore::Core::InternalThre
 void InvalidationTracker::DisableSMCDetection() {
   std::unique_lock Lock(IntervalsLock);
   SMCDetectionDisabled = true;
+#ifdef __REACTOS__
+  if (ManagedExecutableWrites) {
+    if (SetProcessExecutableWriteExceptions(false) != STATUS_SUCCESS) {
+      LogMan::Msg::EFmt("Failed to disable managed executable writes");
+    }
+    ManagedExecutableWrites = false;
+  }
+#endif
   uint64_t Address = 0;
 
   // Reprotect all RWX intervals as writable
@@ -362,8 +500,25 @@ bool InvalidationTracker::ProtectRWXIntervalsInternal(uint64_t Address, uint64_t
       }
       void* TmpAddress = reinterpret_cast<void*>(Address);
       SIZE_T TmpSize = static_cast<SIZE_T>(std::min(End, Address + Query.Size) - Address);
+#ifdef __REACTOS__
+      // Managed executable writes: trapping is done by re-arming kernel dirty-state tracking instead of removing write
+      // access, and the kernel restores write access itself once the fault handler has performed the write.
+      // DEP-promoted intervals are not executable at the OS level and keep using protection changes.
+      if (ManagedExecutableWrites && GetTrapProt(Address) == PAGE_EXECUTE_READ) {
+        if (!ForWriteLocked) {
+          const auto Status = ResetExecutableWriteTracking(Address, TmpSize);
+          if (Status != STATUS_SUCCESS) {
+            LogMan::Msg::EFmt("Failed to rearm executable-write tracking for {:X}-{:X}: {:X}", Address, Address + TmpSize, static_cast<uint32_t>(Status));
+          }
+        }
+      } else {
+        ULONG TmpProt;
+        NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, ForWriteLocked ? GetUntrapProt(Address) : GetTrapProt(Address), &TmpProt);
+      }
+#else
       ULONG TmpProt;
       NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, ForWriteLocked ? GetUntrapProt(Address) : GetTrapProt(Address), &TmpProt);
+#endif
     } else if (!Query.Size) {
       // No more regions past `Address` in the interval list
       break;

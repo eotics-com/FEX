@@ -71,6 +71,20 @@ ExitFunctionSuspendResumePoint:
   // It is assumed that a 'blr x16' instruction is only ever used to call into x86 code from an exit thunk, and that all
   // exported ARM64EC functions have a 4-byte offset to their entry thunk immediately before their first instruction.
   mov x17, x9
+#ifdef __REACTOS__
+  // ReactOS keeps ntdll pure ARM64. Calls from translated x64 code therefore
+  // need a native return bridge instead of ARM64EC entry-thunk resolution.
+  adrp x16, NtDllBase
+  ldr x16, [x16, #:lo12:NtDllBase]
+  cmp x17, x16
+  b.lo resolve_entry_thunk
+  adrp x16, NtDllEnd
+  ldr x16, [x16, #:lo12:NtDllEnd]
+  cmp x17, x16
+  b.lo call_native_ntdll
+
+resolve_entry_thunk:
+#endif
   mov w16, #0x200
   movk w16, #0xd63f, lsl 16 // blr x16
   ldursw x23, [x17, #-0x4] // Load either the entry thunk offset or the calling instruction.
@@ -95,6 +109,30 @@ ret_sp_misaligned:
   adrp lr, X64ReturnInstr
   ldr lr, [lr, #:lo12:X64ReturnInstr]
   br x17
+#ifdef __REACTOS__
+
+call_native_ntdll:
+  mov x16, x17
+  mov x4, sp
+  tbz x4, #3, call_native_ntdll_aligned
+  // Keep the native call 16-byte aligned without consuming the x64 return
+  // address. The bridge removes this padding before executing an x64 RET.
+  sub sp, sp, #0x8
+  adr lr, return_from_native_ntdll_padded
+  br x16
+
+return_from_native_ntdll_padded:
+  add sp, sp, #0x8
+
+return_from_native_ntdll:
+  adrp x9, X64ReturnInstr
+  ldr x9, [x9, #:lo12:X64ReturnInstr]
+  b check_target_ec
+
+call_native_ntdll_aligned:
+  adr lr, return_from_native_ntdll
+  br x16
+#endif
 
 .global ExitFunctionSuspendPoint
 ExitFunctionSuspendPoint:
@@ -103,6 +141,15 @@ ExitFunctionSuspendPoint:
 
   // Makes a wrapper for calling a system call directly, skipping the usual ntdll thunks
 #define HASH #
+#ifdef __REACTOS__
+#define DIRECT_SYSCALL_WRAPPER(Name, SyscallIdName, WindowsId) \
+  .global Name; \
+  Name:; \
+    adrp x8, SyscallIdName; \
+    ldr x8, [x8, HASH:lo12:SyscallIdName]; \
+    svc HASH 0; \
+    ret
+#else
 #define DIRECT_SYSCALL_WRAPPER(Name, WineIdName, WindowsId) \
   .global Name; \
   Name:; \
@@ -117,6 +164,7 @@ ExitFunctionSuspendPoint:
   1:; \
     svc HASH WindowsId; \
     ret
+#endif
 
   // Allows for continuing from a full native context, as the NTDLL NtContinue export takes in an x64 context with EC and
   // the conversion to that loses the ARM64EC ABI-disallowed registers that FEX uses.
@@ -136,17 +184,35 @@ DIRECT_SYSCALL_WRAPPER("#NtProtectVirtualMemoryNative", WineNtProtectVirtualMemo
   adrp x9, NtDllBase
   ldr x9, [x9, #:lo12:NtDllBase]
   subs x16, x11, x9
+#ifdef __REACTOS__
+  b.lo default_check
+#else
   b.lo end
+#endif
   adrp x17, NtDllRedirectionLUTSize
   ldr x17, [x17, #:lo12:NtDllRedirectionLUTSize]
   cmp x16, x17
+#ifdef __REACTOS__
+  b.hs default_check
+#else
   b.hi end
+#endif
   adrp x17, NtDllRedirectionLUT
   ldr x17, [x17, #:lo12:NtDllRedirectionLUT]
   ldr w11, [x17, x16, lsl #2]
   add x11, x11, x9
 end:
   ret
+#ifdef __REACTOS__
+
+  // ReactOS: targets outside the ntdll LUT (other ARM64EC DLLs) are handed to the loader-installed call checker
+  // captured in PatchCallChecker, which consumes x10/x11 like a regular __os_arm64x_dispatch_call.
+default_check:
+  adrp x9, DefaultCheckCall
+  ldr x9, [x9, #:lo12:DefaultCheckCall]
+  cbz x9, end
+  br x9
+#endif
 
   // Expects target address in x0, and the SP to set in x1
 .global "#JumpSetStack"

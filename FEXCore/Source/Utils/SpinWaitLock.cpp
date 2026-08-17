@@ -6,9 +6,13 @@ namespace FEXCore::Utils::SpinWaitLock {
 constexpr uint64_t NanosecondsInSecond = 1'000'000'000ULL;
 
 static uint64_t GetCycleCounterFrequency() {
+#ifdef __REACTOS__
+  return NanosecondsInSecond;
+#else
   uint64_t Result {};
   __asm("mrs %[Res], CNTFRQ_EL0" : [Res] "=r"(Result));
   return Result;
+#endif
 }
 
 static uint64_t CalculateCyclesPerNanosecond() {

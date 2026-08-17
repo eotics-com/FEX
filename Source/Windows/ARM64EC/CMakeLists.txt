@@ -19,7 +19,11 @@ target_link_libraries(arm64ecfex PRIVATE
   CommonWindowsRuntime
   ntdll_ex)
 
-target_link_options(arm64ecfex PRIVATE -static -nostdlib -nostartfiles -nodefaultlibs -lc++ -lc++abi -lunwind)
+if (REACTOS)
+  target_link_options(arm64ecfex PRIVATE -static -nostdlib -nostartfiles -lc++ -lc++abi -lunwind -lucrt -lmingwex)
+else()
+  target_link_options(arm64ecfex PRIVATE -static -nostdlib -nostartfiles -nodefaultlibs -lc++ -lc++abi -lunwind)
+endif()
 target_link_libraries(arm64ecfex PRIVATE ${LIBGCC_PATH})
 install(TARGETS arm64ecfex RUNTIME
   DESTINATION ${CMAKE_INSTALL_LIBDIR}
