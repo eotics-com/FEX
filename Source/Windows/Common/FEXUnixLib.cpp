@@ -139,6 +139,10 @@ static bool UnixLibAvailable() {
 }
 
 bool TryEnableHardwareTSO() {
+#ifdef __REACTOS__
+  // ReactOS has neither the Wine unixlib nor the Proton ProcessFex* information classes.
+  return false;
+#endif
   if (UnixLibAvailable()) {
     // UnixLib path.
     FEXUnixLib_SetHardwareTSOControlArgs Args {
@@ -155,6 +159,9 @@ bool TryEnableHardwareTSO() {
 }
 
 bool SetKernelUnalignedAtomicControl(uint64_t Flags) {
+#ifdef __REACTOS__
+  return false;
+#endif
   if (UnixLibAvailable()) {
     // UnixLib path.
     FEXUnixLib_SetKernelUnalignedAtomicControl Args {
@@ -169,6 +176,11 @@ bool SetKernelUnalignedAtomicControl(uint64_t Flags) {
 }
 
 void VirtualTHPControl(const void* Ptr, size_t Size, FEXCore::Allocator::THPControl Control) {
+#ifdef __REACTOS__
+  // The legacy path below issues a raw Linux `svc #0` (madvise), which on ReactOS would invoke an unrelated
+  // ReactOS system call with these arguments. Transparent huge page hints have no equivalent here.
+  return;
+#endif
   if (UnixLibAvailable()) {
     // UnixLib path.
     FEXUnixLib_Madvise Args {
@@ -186,6 +198,10 @@ void VirtualTHPControl(const void* Ptr, size_t Size, FEXCore::Allocator::THPCont
 }
 
 void VirtualName(const char* Name, const void* Ptr, size_t Size) {
+#ifdef __REACTOS__
+  // Same as VirtualTHPControl: the legacy path is a raw Linux prctl syscall. Anonymous VMA names do not exist on ReactOS.
+  return;
+#endif
   if (!SupportsVirtualName) {
     return;
   }
@@ -209,6 +225,10 @@ void VirtualName(const char* Name, const void* Ptr, size_t Size) {
 }
 
 SHMSlotResult AllocateSHMSlots(void* SHMBase, uint32_t MapSize, uint32_t MaxSize) {
+#ifdef __REACTOS__
+  // No unixlib, no MemoryFexStatsShm and no /dev/shm on ReactOS; the legacy path also uses a raw Linux getpid syscall.
+  return {};
+#endif
   if (UnixLibAvailable()) {
     // UnixLib path.
     FEXUnixLib_GetSHMStatsVMA Args {
@@ -277,6 +297,9 @@ SHMSlotResult AllocateSHMSlots(void* SHMBase, uint32_t MapSize, uint32_t MaxSize
 }
 
 void DeleteSHMStatsFile() {
+#ifdef __REACTOS__
+  return;
+#endif
   if (UnixLibAvailable()) {
     // UnixLib path.
     Call(FEXUnixLibFunctions::DeleteSHMStatsFile, nullptr);
