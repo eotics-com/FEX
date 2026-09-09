@@ -1237,7 +1237,7 @@ NTSTATUS ThreadTerm(HANDLE Thread, LONG ExitCode) {
     return STATUS_ACCESS_DENIED;
   }
 
-  auto ThreadDup = FEX::Windows::DupHandle(Thread, THREAD_QUERY_INFORMATION | THREAD_SUSPEND_RESUME);
+  auto ThreadDup = FEX::Windows::DupHandle(Thread, THREAD_QUERY_INFORMATION | THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT);
 #ifdef __REACTOS__
   if (!ThreadDup) {
     return STATUS_ACCESS_DENIED;
@@ -1260,12 +1260,13 @@ NTSTATUS ThreadTerm(HANDLE Thread, LONG ExitCode) {
     }
     Suspended = true;
 
-    CONTEXT TmpContext {
-      .ContextFlags = CONTEXT_INTEGER,
+    // ReactOS exposes the native ARM64 context API to the emulator.
+    ARM64_NT_CONTEXT TmpContext {
+      .ContextFlags = CONTEXT_ARM64_INTEGER,
     };
 
     // NtSuspendThread may return before the thread has stopped. Synchronize before destroying its JIT state.
-    if (auto Err = NtGetContextThread(*ThreadDup, &TmpContext); Err) {
+    if (auto Err = NtGetContextThread(*ThreadDup, reinterpret_cast<CONTEXT*>(&TmpContext)); Err) {
       NtResumeThread(*ThreadDup, nullptr);
       return Err;
     }
