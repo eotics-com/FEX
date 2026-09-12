@@ -366,13 +366,18 @@ void ParseWineSyscallNumbers(HMODULE NtDll) {
 }
 #ifdef __REACTOS__
 
-// ReactOS ARM64 syscall stubs are `movz x8, #id; svc #0; ret`.
 uint64_t ParseReactOSSyscallNumber(HMODULE NtDll, const char* Name) {
   const auto* Stub = reinterpret_cast<const uint32_t*>(GetProcAddress(NtDll, Name));
-  if (!Stub || ((*Stub & 0xFFE0001F) != 0xD2800008)) {
+  if (!Stub) {
     return ~0ULL;
   }
 
+  if ((Stub[0] & 0xFFE0001F) == 0xD4000001 && Stub[1] == 0xD65F03C0) {
+    return (Stub[0] >> 5) & 0xFFFF;
+  }
+  if ((Stub[0] & 0xFFE0001F) != 0xD2800008 || Stub[1] != 0xD4000001 || Stub[2] != 0xD65F03C0) {
+    return ~0ULL;
+  }
   return (*Stub >> 5) & 0xFFFF;
 }
 #endif
