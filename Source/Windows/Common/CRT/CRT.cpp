@@ -41,6 +41,7 @@ void RunFuncArray(TFuncIt Begin, TFuncIt End, TArgs... Args) {
 namespace FEX::Windows {
 void InitCRTProcess() {
   rpmalloc_initialize(nullptr);
+  rpfree(rpmalloc(1));
 
   auto GNUCtorBegin = &__CTOR_LIST__[1];
   auto GNUCtorEnd = GNUCtorBegin;
