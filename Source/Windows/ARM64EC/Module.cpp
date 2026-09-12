@@ -724,10 +724,21 @@ NTSTATUS ProcessInit() {
   const auto NtDll = GetModuleHandleW(L"ntdll.dll");
   const bool IsWine = !!GetProcAddress(NtDll, "wine_get_version");
   OvercommitTracker.emplace(IsWine);
+#ifdef __REACTOS__
+  if (const auto EcCodeBitmap = *reinterpret_cast<uint64_t*>(reinterpret_cast<uintptr_t>(reinterpret_cast<__TEB*>(NtCurrentTeb())->Peb) + 0x368)) {
+    OvercommitTracker->MarkRange(EcCodeBitmap, 1ULL << 32);
+  }
+#endif
 
   FEX::Windows::SetupEnvironmentVariableValues(NtDll);
 
-  FEX::Windows::Allocator::SetupHooks(NtDll);
+  FEX::Windows::Allocator::SetupHooks(NtDll, [](const void* Ptr, size_t Size, bool Exec, bool Mark) {
+    if (Mark) {
+      OvercommitTracker->MarkRange(reinterpret_cast<uint64_t>(Ptr), Size, Exec);
+    } else {
+      OvercommitTracker->UnmarkRange(reinterpret_cast<uint64_t>(Ptr), Size);
+    }
+  });
   FEX::Windows::UnixLib::Init(NtDll);
 
   {

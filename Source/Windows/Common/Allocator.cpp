@@ -14,12 +14,13 @@
 #include <wine/debug.h>
 
 namespace FEX::Windows::Allocator {
-void SetupHooks(HMODULE ntdll) {
+void SetupHooks(HMODULE ntdll, FEXCore::Allocator::OvercommitPtr Overcommit) {
   FEXCore::Allocator::HookPtrs Ptrs {};
 
   Ptrs = {
     .VirtualName = UnixLib::VirtualName,
     .VirtualTHPControl = UnixLib::VirtualTHPControl,
+    .Overcommit = Overcommit,
   };
 
   SYSTEM_INFO system_info {};

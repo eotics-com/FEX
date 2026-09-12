@@ -31,13 +31,20 @@ void InitializeThread(FEXCore::Core::InternalThreadState* Thread) {
                                         FEXCore::Allocator::THPControl::Disable);
 
   Thread->CallRetStackBase = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(CallRetStackAlloc) + FEXCore::Utils::FEX_PAGE_SIZE);
-  ::VirtualAlloc(Thread->CallRetStackBase, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE, MEM_COMMIT, PAGE_READWRITE);
+  if (FEXCore::Allocator::Overcommit) {
+    FEXCore::Allocator::Overcommit(Thread->CallRetStackBase, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE, false, true);
+  } else {
+    ::VirtualAlloc(Thread->CallRetStackBase, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE, MEM_COMMIT, PAGE_READWRITE);
+  }
 
   Thread->CurrentFrame->State.callret_sp = GetInfoThread(Thread).DefaultLocation;
 }
 
 void DestroyThread(FEXCore::Core::InternalThreadState* Thread) {
   auto CallRetStackInfo = GetInfoThread(Thread);
+  if (FEXCore::Allocator::Overcommit) {
+    FEXCore::Allocator::Overcommit(Thread->CallRetStackBase, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE, false, false);
+  }
   ::VirtualFree(reinterpret_cast<void*>(CallRetStackInfo.AllocationBase), 0, MEM_RELEASE);
 }
 

@@ -37,16 +37,23 @@ FEX_DEFAULT_VISIBILITY void SetupHooks(size_t PageSize);
 #else
 using VirtualNamePtr = void (*)(const char*, const void*, size_t);
 using VirtualTHPPtr = void (*)(const void*, size_t, THPControl);
+using OvercommitPtr = void (*)(const void*, size_t, bool, bool);
 struct HookPtrs {
   VirtualNamePtr VirtualName;
   VirtualTHPPtr VirtualTHPControl;
+  OvercommitPtr Overcommit;
 };
 FEX_DEFAULT_VISIBILITY void SetupHooks(size_t PageSize, HookPtrs Ptrs);
 #endif
 FEX_DEFAULT_VISIBILITY void ClearHooks();
 
 #ifdef _WIN32
+FEX_DEFAULT_VISIBILITY extern OvercommitPtr Overcommit;
+
 inline void* VirtualAlloc(void* Base, size_t Size, bool Execute = false, bool Commit = true) {
+  if (!Commit && !Overcommit) {
+    Commit = true;
+  }
   // Allocate top-down to avoid polluting the lower VA space, as even on 64-bit some programs (i.e. LuaJIT) require allocations below 4GB.
   DWORD Flags = (Commit ? MEM_COMMIT : 0) | MEM_RESERVE | MEM_TOP_DOWN;
 #ifdef ARCHITECTURE_arm64ec
@@ -55,11 +62,15 @@ inline void* VirtualAlloc(void* Base, size_t Size, bool Execute = false, bool Co
     Parameter.Type = MemExtendedParameterAttributeFlags;
     Parameter.ULong64 = MEM_EXTENDED_PARAMETER_EC_CODE;
   };
-  return ::VirtualAlloc2(nullptr, Base, Size, Flags, Execute ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE, Execute ? &Parameter : nullptr,
-                         Execute ? 1 : 0);
+  void* Result = ::VirtualAlloc2(nullptr, Base, Size, Flags, Execute ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE, Execute ? &Parameter : nullptr,
+                                 Execute ? 1 : 0);
 #else
-  return ::VirtualAlloc(Base, Size, Flags, Execute ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE);
+  void* Result = ::VirtualAlloc(Base, Size, Flags, Execute ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE);
 #endif
+  if (Result && !Commit) {
+    Overcommit(Result, Size, Execute, true);
+  }
+  return Result;
 }
 
 inline void* VirtualAlloc(size_t Size, bool Execute = false, bool Commit = true) {
@@ -67,6 +78,9 @@ inline void* VirtualAlloc(size_t Size, bool Execute = false, bool Commit = true)
 }
 
 inline void VirtualFree(void* Ptr, size_t Size) {
+  if (Overcommit) {
+    Overcommit(Ptr, Size, false, false);
+  }
   ::VirtualFree(Ptr, 0, MEM_RELEASE);
 }
 
@@ -75,7 +89,7 @@ inline void VirtualDontNeed(void* Ptr, size_t Size, bool Recommit = true) {
   MEMORY_BASIC_INFORMATION Info;
   ::VirtualQuery(Ptr, &Info, sizeof(Info));
   ::VirtualFree(Ptr, Size, MEM_DECOMMIT);
-  if (Recommit) {
+  if (Recommit || !Overcommit) {
     ::VirtualAlloc(Ptr, Size, MEM_COMMIT, Info.Protect);
   }
 }

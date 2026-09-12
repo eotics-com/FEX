@@ -385,7 +385,7 @@ public:
 
 private:
   void* Alloc(size_t Size) override {
-    auto Result = FEXCore::Allocator::VirtualAlloc(Size);
+    auto Result = FEXCore::Allocator::VirtualAlloc(Size, false, false);
     if (Name) {
       FEXCore::Allocator::VirtualName(Name, Result, Size);
     }

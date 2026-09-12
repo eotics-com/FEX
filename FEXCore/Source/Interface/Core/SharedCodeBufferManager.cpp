@@ -18,11 +18,14 @@ static constexpr size_t MAX_CODE_SIZE = 1024 * 1024 * 128;
 
 CodeBuffer::CodeBuffer(size_t Size)
   : AllocatedSize(Size) {
-  Ptr = static_cast<uint8_t*>(FEXCore::Allocator::VirtualAlloc(Size, true));
+  Ptr = static_cast<uint8_t*>(FEXCore::Allocator::VirtualAlloc(Size, true, false));
   LOGMAN_THROW_A_FMT(!!Ptr, "Couldn't allocate code buffer");
 
   // Protect the last page of the allocated buffer to trigger SIGSEGV on write access
   uintptr_t LastPageAddr = AlignDown(reinterpret_cast<uintptr_t>(Ptr) + Size - 1, FEXCore::Utils::FEX_PAGE_SIZE);
+#ifdef _WIN32
+  ::VirtualAlloc(reinterpret_cast<void*>(LastPageAddr), FEXCore::Utils::FEX_PAGE_SIZE, MEM_COMMIT, PAGE_NOACCESS);
+#endif
   if (!FEXCore::Allocator::VirtualProtect(reinterpret_cast<void*>(LastPageAddr), FEXCore::Utils::FEX_PAGE_SIZE,
                                           FEXCore::Allocator::ProtectOptions::None)) {
     LogMan::Msg::EFmt("Failed to mprotect last page of code buffer.");

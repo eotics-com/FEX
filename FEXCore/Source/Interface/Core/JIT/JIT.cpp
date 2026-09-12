@@ -822,7 +822,7 @@ SharedCodeBufferManager::CodeBufferAllocation Arm64JITCore::AllocateCodeBufferIn
                                                                                                "doesn't match up!\n");
   // Bring CodeBuffer up to date
   if (auto Prev = CheckCodeBufferUpdate()) {
-    Allocator::VirtualDontNeed(ThreadState->CallRetStackBase, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE);
+    Allocator::VirtualDontNeed(ThreadState->CallRetStackBase, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE, false);
     auto lk = ThreadState->LookupCache->AcquireWriteLock();
     ThreadState->LookupCache->ChangeGuestToHostMapping(*Prev, *CurrentCodeBuffer->LookupCache, lk);
   }
