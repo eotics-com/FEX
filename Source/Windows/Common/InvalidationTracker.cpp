@@ -66,7 +66,7 @@ InvalidationTracker::InvalidationTracker(FEXCore::Context::Context& CTX, const s
 
     Address = BaseAddress + Info.RegionSize;
   }
-#ifdef __REACTOS__
+#if defined(__REACTOS__) && defined(_M_ARM64EC)
 
   // FEX's dispatcher and initial host code buffer exist before the tracker. Leave those native EC mappings writable;
   // managed dirty-state tracking is for guest executable memory registered below and after process initialization.
