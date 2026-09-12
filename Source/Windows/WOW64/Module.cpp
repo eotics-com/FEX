@@ -868,6 +868,21 @@ NTSTATUS BTCpuSuspendLocalThread(HANDLE Thread, ULONG* Count) {
   return Err;
 }
 
+#ifdef __REACTOS__
+static uint32_t HandleDebugService(const WOW64_CONTEXT& Context) {
+  register uint64_t Service asm("x0") = Context.Eax;
+  register uint64_t Argument1 asm("x1") = Context.Ecx;
+  register uint64_t Argument2 asm("x2") = Context.Edx;
+  register uint64_t Argument3 asm("x3") = Context.Ebx;
+  register uint64_t Argument4 asm("x4") = Context.Edi;
+  asm volatile("brk #0xf002"
+               : "+r"(Service)
+               : "r"(Argument1), "r"(Argument2), "r"(Argument3), "r"(Argument4)
+               : "memory");
+  return Service;
+}
+#endif
+
 // Returns true if exception dispatch should be halted and the execution context restored to Ptrs->Context
 bool BTCpuResetToConsistentStateImpl(EXCEPTION_POINTERS* Ptrs) {
   auto* Context = Ptrs->ContextRecord;
@@ -935,6 +950,19 @@ bool BTCpuResetToConsistentStateImpl(EXCEPTION_POINTERS* Ptrs) {
   LogMan::Msg::DFmt("pc: {:X} eip: {:X}", Context->Pc, WowContext.Eip);
 
   auto& Fault = Thread->CurrentFrame->SynchronousFaultData;
+#ifdef __REACTOS__
+  if (Fault.FaultToTopAndGeneratedException && Fault.Signal == FEXCore::Core::FAULT_SIGSEGV &&
+      Fault.TrapNo == FEXCore::X86State::X86_TRAPNO_GP && Fault.err_code == ((0x2d << 3) | 2) &&
+      (WowContext.Eax == 1 || WowContext.Eax == 2)) {
+    Fault.FaultToTopAndGeneratedException = false;
+    WowContext.Eax = HandleDebugService(WowContext);
+    WowContext.Eip += 3;
+    Context::LoadStateFromWowContext(Thread, GetWowTEB(NtCurrentTeb()), &WowContext);
+    Context->Pc = SignalDelegator->GetConfig().AbsoluteLoopTopAddressFillSRA;
+    Context->X1 = 0;
+    return true;
+  }
+#endif
   *Exception = FEX::Windows::HandleGuestException(Fault, *Exception, WowContext.Eip, WowContext.Eax, WowContext.Ecx);
   if (Exception->ExceptionCode == EXCEPTION_SINGLE_STEP) {
     WowContext.EFlags &= ~(1 << FEXCore::X86State::RFLAG_TF_RAW_LOC);
