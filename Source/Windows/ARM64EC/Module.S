@@ -71,6 +71,12 @@ ExitFunctionSuspendResumePoint:
   // It is assumed that a 'blr x16' instruction is only ever used to call into x86 code from an exit thunk, and that all
   // exported ARM64EC functions have a 4-byte offset to their entry thunk immediately before their first instruction.
   mov x17, x9
+  mov w16, #0x200
+  movk w16, #0xd63f, lsl 16 // blr x16
+  ldursw x23, [x17, #-0x4] // Load either the entry thunk offset or the calling instruction.
+  cmp w23, w16
+  beq ret_sp_aligned
+
 #ifdef __REACTOS__
   // ReactOS keeps ntdll pure ARM64. Calls from translated x64 code therefore
   // need a native return bridge instead of ARM64EC entry-thunk resolution.
@@ -85,12 +91,6 @@ ExitFunctionSuspendResumePoint:
 
 resolve_entry_thunk:
 #endif
-  mov w16, #0x200
-  movk w16, #0xd63f, lsl 16 // blr x16
-  ldursw x23, [x17, #-0x4] // Load either the entry thunk offset or the calling instruction.
-  cmp w23, w16
-  beq ret_sp_aligned
-
   and x23, x23, #-0x4
   add x17, x17, x23 // Resolve entry thunk address.
 
@@ -113,25 +113,33 @@ ret_sp_misaligned:
 
 call_native_ntdll:
   mov x16, x17
-  mov x4, sp
-  tbz x4, #3, call_native_ntdll_aligned
+  mov x17, sp
+  ldp x4, x5, [x17, #0x28]
+  ldp x6, x7, [x17, #0x38]
+  tbz x17, #3, call_native_ntdll_aligned
   // Keep the native call 16-byte aligned without consuming the x64 return
   // address. The bridge removes this padding before executing an x64 RET.
   sub sp, sp, #0x8
-  adr lr, return_from_native_ntdll_padded
-  br x16
 
-return_from_native_ntdll_padded:
-  add sp, sp, #0x8
-
-return_from_native_ntdll:
+call_native_ntdll_aligned:
+  stp q6, q7, [sp, #-0xa0]!
+  stp q8, q9, [sp, #0x20]
+  stp q10, q11, [sp, #0x40]
+  stp q12, q13, [sp, #0x60]
+  stp q14, q15, [sp, #0x80]
+  str x17, [sp, #-0x10]!
+  blr x16
+  ldr x17, [sp], #0x10
+  ldp q8, q9, [sp, #0x20]
+  ldp q10, q11, [sp, #0x40]
+  ldp q12, q13, [sp, #0x60]
+  ldp q14, q15, [sp, #0x80]
+  ldp q6, q7, [sp], #0xa0
+  mov sp, x17
+  mov x8, x0
   adrp x9, X64ReturnInstr
   ldr x9, [x9, #:lo12:X64ReturnInstr]
   b check_target_ec
-
-call_native_ntdll_aligned:
-  adr lr, return_from_native_ntdll
-  br x16
 #endif
 
 .global ExitFunctionSuspendPoint
@@ -147,7 +155,7 @@ ExitFunctionSuspendPoint:
   Name:; \
     adrp x8, SyscallIdName; \
     ldr x8, [x8, HASH:lo12:SyscallIdName]; \
-    svc HASH 0; \
+    svc HASH 0xffff; \
     ret
 #else
 #define DIRECT_SYSCALL_WRAPPER(Name, WineIdName, WindowsId) \
