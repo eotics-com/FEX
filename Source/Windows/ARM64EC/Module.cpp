@@ -945,7 +945,7 @@ NTSTATUS ResetToConsistentState(EXCEPTION_RECORD* Exception, CONTEXT* GuestConte
     if (OvercommitTracker) {
       {
         ScopedCallbackDisable guard;
-        Cont = OvercommitTracker->HandleAccessViolation(FaultAddress);
+        Cont = OvercommitTracker->HandleAccessViolation(FaultAddress, Exception->ExceptionInformation[0]);
       }
       if (Cont) {
         NtContinueNative(NativeContext, false);

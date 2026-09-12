@@ -883,7 +883,7 @@ bool BTCpuResetToConsistentStateImpl(EXCEPTION_POINTERS* Ptrs) {
       return true;
     }
 
-    if (OvercommitTracker && OvercommitTracker->HandleAccessViolation(FaultAddress)) {
+    if (OvercommitTracker && OvercommitTracker->HandleAccessViolation(FaultAddress, Exception->ExceptionInformation[0])) {
       return true;
     }
 
