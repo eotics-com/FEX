@@ -261,11 +261,28 @@ DLLEXPORT_FUNC(WINBOOL, SetEndOfFile, (HANDLE hFile)) {
 }
 
 DLLEXPORT_FUNC(DWORD, GetFileAttributesA, (LPCSTR lpFileName)) {
-  UNIMPLEMENTED();
+  ScopedUnicodeString FileName {lpFileName};
+  if (!FileName->Buffer) {
+    SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+    return INVALID_FILE_ATTRIBUTES;
+  }
+  return GetFileAttributesW(FileName->Buffer);
 }
 
 DLLEXPORT_FUNC(DWORD, GetFileAttributesW, (LPCWSTR lpFileName)) {
-  UNIMPLEMENTED();
+  ScopedUnicodeString NTPath;
+  if (!RtlDosPathNameToNtPathName_U(lpFileName, &*NTPath, nullptr, nullptr)) {
+    SetLastError(ERROR_PATH_NOT_FOUND);
+    return INVALID_FILE_ATTRIBUTES;
+  }
+
+  OBJECT_ATTRIBUTES ObjAttributes;
+  InitializeObjectAttributes(&ObjAttributes, &*NTPath, OBJ_CASE_INSENSITIVE, nullptr, nullptr);
+  FILE_BASIC_INFORMATION Information;
+  if (!WinAPIReturn(NtQueryAttributesFile(&ObjAttributes, &Information))) {
+    return INVALID_FILE_ATTRIBUTES;
+  }
+  return Information.FileAttributes;
 }
 
 DLLEXPORT_FUNC(WINBOOL, SetFileAttributesA, (LPCSTR lpFileName, DWORD dwFileAttributes)) {
