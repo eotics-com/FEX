@@ -56,6 +56,9 @@ $end_info$
 #include <utility>
 #include <unordered_map>
 #include <ntstatus.h>
+#ifndef STATUS_EXECUTABLE_MEMORY_WRITE
+#define STATUS_EXECUTABLE_MEMORY_WRITE ((NTSTATUS)0xC0000723L)
+#endif
 #include <windef.h>
 #include <winternl.h>
 #include <wine/debug.h>
@@ -882,9 +885,19 @@ bool BTCpuResetToConsistentStateImpl(EXCEPTION_POINTERS* Ptrs) {
   auto Thread = TLS.ThreadState();
   FEXCORE_PROFILE_ACCUMULATION(Thread, AccumulatedSignalTime);
 
-  if (Exception->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
-    const auto FaultAddress = static_cast<uint64_t>(Exception->ExceptionInformation[1]);
+  const auto FaultAddress = Exception->NumberParameters > 1 ? static_cast<uint64_t>(Exception->ExceptionInformation[1]) : 0;
+  const bool ManagedExecutableWrite = Exception->ExceptionCode == STATUS_IN_PAGE_ERROR && Exception->NumberParameters == 3 &&
+                                      Exception->ExceptionInformation[0] == 1 &&
+                                      Exception->ExceptionInformation[2] == static_cast<ULONG_PTR>(STATUS_EXECUTABLE_MEMORY_WRITE);
 
+#ifdef __REACTOS__
+  if (ManagedExecutableWrite && InvalidationTracker &&
+      InvalidationTracker->HandleJitCodeWrite(Thread, Context->Pc, FaultAddress)) {
+    return true;
+  }
+#endif
+
+  if (Exception->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
     if (FEX::Windows::CallRetStack::HandleAccessViolation(Thread, FaultAddress, Context->X25)) {
       return true;
     }
@@ -902,7 +915,9 @@ bool BTCpuResetToConsistentStateImpl(EXCEPTION_POINTERS* Ptrs) {
                                                        reinterpret_cast<__uint128_t*>(Context->V), &Context->Pc)) {
       return true;
     }
+  }
 
+  if (Exception->ExceptionCode == EXCEPTION_ACCESS_VIOLATION || ManagedExecutableWrite) {
     if (Thread) {
       std::scoped_lock Lock(ThreadCreationMutex);
       FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedSMCCount, 1);
@@ -983,8 +998,8 @@ void BTCpuNotifyMemoryAlloc(void* Address, SIZE_T Size, ULONG Type, ULONG Prot, 
   if (!After) {
     ThreadCreationMutex.lock();
   } else {
-    // MEM_RESET(_UNDO) ignores the passed permissions
-    if (!Status && !(Type & (MEM_RESET | MEM_RESET_UNDO))) {
+    // A reservation has no accessible pages; MEM_RESET(_UNDO) ignores permissions.
+    if (!Status && (Type & MEM_COMMIT) && !(Type & (MEM_RESET | MEM_RESET_UNDO))) {
       InvalidationTracker->HandleMemoryProtectionNotification(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), Prot);
     }
     ThreadCreationMutex.unlock();

@@ -874,6 +874,11 @@ bool ResetToConsistentStateImpl(const ThreadCPUArea CPUArea, EXCEPTION_RECORD* E
   const bool ManagedExecutableWrite = Exception->ExceptionCode == STATUS_IN_PAGE_ERROR && Exception->NumberParameters == 3 && Exception->ExceptionInformation[0] == 1 && Exception->ExceptionInformation[2] == static_cast<ULONG_PTR>(STATUS_EXECUTABLE_MEMORY_WRITE);
   const uint64_t FaultAddress = Exception->NumberParameters > 1 ? static_cast<uint64_t>(Exception->ExceptionInformation[1]) : 0;
 
+  if (ManagedExecutableWrite && InvalidationTracker &&
+      InvalidationTracker->HandleJitCodeWrite(Thread, NativeContext->Pc, FaultAddress)) {
+    return true;
+  }
+
   if (Exception->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
 #else
   if (Exception->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
@@ -990,8 +995,8 @@ void NotifyMemoryAlloc(void* Address, SIZE_T Size, ULONG Type, ULONG Prot, BOOL 
   if (!After) {
     ThreadCreationMutex.lock();
   } else {
-    // MEM_RESET(_UNDO) ignores the passed permissions
-    if (!Status && !(Type & (MEM_RESET | MEM_RESET_UNDO))) {
+    // A reservation has no accessible pages; MEM_RESET(_UNDO) ignores permissions.
+    if (!Status && (Type & MEM_COMMIT) && !(Type & (MEM_RESET | MEM_RESET_UNDO))) {
       InvalidationTracker->HandleMemoryProtectionNotification(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), Prot);
     }
     ThreadCreationMutex.unlock();

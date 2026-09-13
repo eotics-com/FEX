@@ -43,6 +43,8 @@ public:
   // NOTE: CodeInvalidationMutex must be locked when calling this, and if true is returned, kept locked until the write ends.
   bool BeginUntrackedWriteLocked(uint64_t Address, uint64_t Size);
 #ifdef __REACTOS__
+  // Only for a managed-write exception while native code populates a JIT buffer.
+  bool HandleJitCodeWrite(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC, uint64_t FaultAddress);
   // Re-arms kernel executable-write tracking after an untracked write. Only meaningful for managed executable writes.
   void EndUntrackedWriteLocked(uint64_t Address, uint64_t Size);
 #endif
@@ -58,6 +60,7 @@ private:
 #ifdef __REACTOS__
   NTSTATUS ResetExecutableWriteTracking(uint64_t Address, uint64_t Size);
   NTSTATUS SetThreadExecutableWrites(bool AllowWrites);
+  bool AllowExecutablePageWrite(uint64_t Address);
 #endif
 
   // NOTE: If ForWriteLocked is true then this assumes CodeInvalidationMutex is locked by the caller,

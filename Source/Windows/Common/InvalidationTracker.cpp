@@ -319,29 +319,24 @@ bool InvalidationTracker::HandleRWXAccessViolation(FEXCore::Core::InternalThread
       // Managed executable writes: let this thread perform the write once so the kernel marks the page dirty (writable) again.
       // DEP-promoted pages are not executable at the OS level and keep using protection changes.
       if (ManagedExecutableWrites && UntrapProt == PAGE_EXECUTE_READWRITE) {
-        auto Status = SetThreadExecutableWrites(true);
-        if (Status != STATUS_SUCCESS) {
-          LogMan::Msg::EFmt("Failed to allow an executable write at {:X}: {:X}", FaultAddress, static_cast<uint32_t>(Status));
-          return false;
-        }
-        auto* FaultByte = reinterpret_cast<volatile uint8_t*>(FaultAddress);
-        *FaultByte = *FaultByte;
-        Status = SetThreadExecutableWrites(false);
-        if (Status != STATUS_SUCCESS) {
-          LogMan::Msg::EFmt("Failed to restore executable-write tracking at {:X}: {:X}", FaultAddress, static_cast<uint32_t>(Status));
+        if (!AllowExecutablePageWrite(FaultAddress)) {
           return false;
         }
       } else {
         ULONG TmpProt;
         void* TmpAddress = reinterpret_cast<void*>(FaultAddress);
         SIZE_T TmpSize = 1;
-        NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, UntrapProt, &TmpProt);
+        if (NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, UntrapProt, &TmpProt) < 0) {
+          return false;
+        }
       }
 #else
       ULONG TmpProt;
       void* TmpAddress = reinterpret_cast<void*>(FaultAddress);
       SIZE_T TmpSize = 1;
-      NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, UntrapProt, &TmpProt);
+      if (NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, UntrapProt, &TmpProt) < 0) {
+        return false;
+      }
 #endif
     }
     DetectMonoBackpatcherBlock(Thread, HostPc);
@@ -354,6 +349,34 @@ bool InvalidationTracker::BeginUntrackedWriteLocked(uint64_t Address, uint64_t S
   return ProtectRWXIntervalsInternal(Address, Size, true);
 }
 #ifdef __REACTOS__
+
+bool InvalidationTracker::AllowExecutablePageWrite(uint64_t Address) {
+  auto Status = SetThreadExecutableWrites(true);
+  if (Status != STATUS_SUCCESS) {
+    LogMan::Msg::EFmt("Failed to allow an executable write at {:X}: {:X}", Address, static_cast<uint32_t>(Status));
+    return false;
+  }
+  auto* FaultByte = reinterpret_cast<volatile uint8_t*>(Address);
+  *FaultByte = *FaultByte;
+  Status = SetThreadExecutableWrites(false);
+  if (Status != STATUS_SUCCESS) {
+    LogMan::Msg::EFmt("Failed to restore executable-write tracking at {:X}: {:X}", Address, static_cast<uint32_t>(Status));
+    return false;
+  }
+  return true;
+}
+
+bool InvalidationTracker::HandleJitCodeWrite(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC, uint64_t FaultAddress) {
+  // WoW64's native code buffers are not EC mappings. A fresh buffer can fault
+  // while CompileCode holds the code-cache lock; it is not guest SMC and must
+  // not recursively invalidate the cache. Guest writes still take the normal
+  // invalidation path, and the code-buffer guard page remains excluded.
+  if (!ManagedExecutableWrites || !Thread || CTX.IsAddressInCodeBuffer(Thread, HostPC) ||
+      !CTX.IsAddressInCodeBuffer(Thread, FaultAddress)) {
+    return false;
+  }
+  return AllowExecutablePageWrite(FaultAddress);
+}
 
 void InvalidationTracker::EndUntrackedWriteLocked(uint64_t Address, uint64_t Size) {
   if (ManagedExecutableWrites) {
