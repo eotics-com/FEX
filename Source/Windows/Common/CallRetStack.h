@@ -50,7 +50,10 @@ void DestroyThread(FEXCore::Core::InternalThreadState* Thread) {
 
 bool HandleAccessViolation(FEXCore::Core::InternalThreadState* Thread, uint64_t Address, uint64_t& CallRetSPReg) {
   auto CallRetStackInfo = GetInfoThread(Thread);
-  if (Address >= CallRetStackInfo.AllocationBase && Address < CallRetStackInfo.AllocationEnd) {
+  // Interior pages may be lazily committed. Let the overcommit handler resolve
+  // those faults; resetting the stack pointer would retry the same missing page.
+  if ((Address >= CallRetStackInfo.AllocationBase && Address < CallRetStackInfo.AllocationBase + FEXCore::Utils::FEX_PAGE_SIZE) ||
+      (Address >= CallRetStackInfo.AllocationEnd - FEXCore::Utils::FEX_PAGE_SIZE && Address < CallRetStackInfo.AllocationEnd)) {
     LogMan::Msg::DFmt("Call-ret stack inbalance: {:X}", Address);
     CallRetSPReg = CallRetStackInfo.DefaultLocation;
     return true;
