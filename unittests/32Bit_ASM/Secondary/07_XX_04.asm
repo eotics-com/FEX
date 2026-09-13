@@ -25,7 +25,8 @@ mov esp, 0x41424344
 mov ebp, 0x41424344
 
 smsw eax
-smsw bx
+; Force the operand-size prefix: NASM 3.x also accepts bx without it.
+o16 smsw bx
 
 smsw [esi]
 mov ecx, [esi]

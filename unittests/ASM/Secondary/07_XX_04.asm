@@ -29,24 +29,24 @@ mov r8, 0x4142434445464748
 mov r9, 0x4142434445464748
 mov r10, 0x4142434445464748
 
-smsw rax
+; NASM 3.x selects the no-REX.W alias for reg64 and omits the reg16
+; operand-size prefix. Encode REX.W cases explicitly and force o16 so this
+; test exercises the requested operand sizes, independently of that alias.
+db 0x48, 0x0f, 0x01, 0xe0 ; smsw rax
 smsw ebx
-smsw cx
+o16 smsw cx
 
 smsw [rsi]
 mov rdx, [rsi]
 
-; operand-size override prefix
-; Nasm complains if o16 is used
-; `warning: invalid operand size prefix o16, must be o64`
-db 0x66
-smsw rdi
-repe smsw rsp
-repne smsw rbp
+; REX.W takes precedence over the operand-size override prefix.
+db 0x66, 0x48, 0x0f, 0x01, 0xe7 ; o16 smsw rdi
+db 0xf3, 0x48, 0x0f, 0x01, 0xe4 ; repe smsw rsp
+db 0xf2, 0x48, 0x0f, 0x01, 0xe5 ; repne smsw rbp
 
 db 0x66
-smsw r8w
-repe smsw r9w
-repne smsw r10w
+o16 smsw r8w
+repe o16 smsw r9w
+repne o16 smsw r10w
 
 hlt
