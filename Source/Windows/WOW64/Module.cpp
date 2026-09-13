@@ -566,9 +566,15 @@ void BTCpuProcessInit() {
   // Allocate the syscall/unixcall trampolines in the lower 2GB of the address space
   SIZE_T Size = 4;
   void* Addr = nullptr;
-  NtAllocateVirtualMemory(NtCurrentProcess(), &Addr, (1U << 31) - 1, &Size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-  InvalidationTracker->HandleMemoryProtectionNotification(reinterpret_cast<uint64_t>(Addr), Size, PAGE_EXECUTE);
+  auto Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Addr, (1U << 31) - 1, &Size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+  LOGMAN_THROW_A_FMT(Status == STATUS_SUCCESS, "Failed to allocate syscall trampolines: {:X}", static_cast<uint32_t>(Status));
+  // The first thread's exception handler is not ready yet. Populate the page
+  // before making it executable, so managed-write tracking cannot fault here.
   *reinterpret_cast<uint32_t*>(Addr) = 0x2ecd2ecd;
+  ULONG OldProtect;
+  Status = NtProtectVirtualMemory(NtCurrentProcess(), &Addr, &Size, PAGE_EXECUTE_READ, &OldProtect);
+  LOGMAN_THROW_A_FMT(Status == STATUS_SUCCESS, "Failed to protect syscall trampolines: {:X}", static_cast<uint32_t>(Status));
+  InvalidationTracker->HandleMemoryProtectionNotification(reinterpret_cast<uint64_t>(Addr), Size, PAGE_EXECUTE_READ);
   BridgeInstrs::Syscall = Addr;
   BridgeInstrs::UnixCall = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(Addr) + 2);
 
