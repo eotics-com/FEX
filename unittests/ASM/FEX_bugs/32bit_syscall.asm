@@ -1,5 +1,6 @@
 %ifdef CONFIG
 {
+  "HostFeatures": ["Linux"],
   "RegData": {
     "RAX": "0"
   }
