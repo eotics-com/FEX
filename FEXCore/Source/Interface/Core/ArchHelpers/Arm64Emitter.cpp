@@ -73,21 +73,27 @@ namespace x64 {
     ARMEmitter::Reg::r8, ARMEmitter::Reg::r16, ARMEmitter::Reg::r17,
   };
 
-  constexpr std::array<ARMEmitter::Register, 7> RA = {
+  constexpr std::array RA = {
     // All these callee saved
     ARMEmitter::Reg::r20, ARMEmitter::Reg::r21, ARMEmitter::Reg::r22, ARMEmitter::Reg::r23,
-    ARMEmitter::Reg::r24, ARMEmitter::Reg::r30, ARMEmitter::Reg::r18,
+    ARMEmitter::Reg::r24, ARMEmitter::Reg::r30,
+#ifndef _WIN32
+    // Windows reserves x18 for the TEB, including while calling JIT helpers.
+    ARMEmitter::Reg::r18,
+#endif
   };
 
   constexpr unsigned RAPairs = 4;
 
   // Dynamic GPRs
-  constexpr std::array<ARMEmitter::Register, 2> PreserveAll_Dynamic = {
+  constexpr std::array PreserveAll_Dynamic = {
+#ifndef _WIN32
     ARMEmitter::Reg::r18,
+#endif
     ARMEmitter::Reg::r30,
   };
 
-  constexpr std::array<ARMEmitter::Register, 2> NotPreserved_Dynamic = PreserveAll_Dynamic;
+  constexpr auto NotPreserved_Dynamic = PreserveAll_Dynamic;
 
   // All are caller saved
   constexpr std::array<ARMEmitter::VRegister, 16> SRAFPR = {
