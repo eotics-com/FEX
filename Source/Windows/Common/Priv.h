@@ -58,7 +58,8 @@ public:
 
 #define UNIMPLEMENTED()                        \
   do {                                         \
-    NtTerminateProcess(NtCurrentProcess(), 0); \
+    DbgPrint("[FEX] unimplemented %s (%s:%d)\n", __func__, __FILE__, __LINE__);     \
+    NtTerminateProcess(NtCurrentProcess(), static_cast<NTSTATUS>(0xC0000002));     \
     __fastfail(0);                             \
   } while (0)
 
