@@ -451,6 +451,14 @@ bool DeadFlagCalculationEliminination::EliminateDeadCode(IREmitter* IREmit, Ref 
     return false;
   }
 
+#ifdef _WIN32
+  // Windows uses otherwise-dead memory reads to probe stack and guard pages.
+  // The read's exception must survive even when all resulting flags are dead.
+  if (IROp->Op == OP_LOADMEM || IROp->Op == OP_LOADMEMTSO || IROp->Op == OP_LOADMEMX87SVEOPTPREDICATE) {
+    return false;
+  }
+#endif
+
   IREmit->Remove(CodeNode);
   return true;
 }
