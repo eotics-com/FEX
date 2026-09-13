@@ -32,7 +32,6 @@ public:
     return GetTLSThread();
   }
 
-protected:
   void RegisterTLSState(FEXCore::Core::InternalThreadState* Thread);
   void UninstallTLSState(FEXCore::Core::InternalThreadState* Thread);
 

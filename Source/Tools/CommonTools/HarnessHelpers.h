@@ -449,8 +449,14 @@ public:
   }
 
   uint64_t StackSize() const override {
+#ifdef _WIN32
+    SYSTEM_INFO Info;
+    GetSystemInfo(&Info);
+    return Info.dwPageSize;
+#else
     const auto Page = sysconf(_SC_PAGESIZE);
     return Page > 0 ? Page : FEXCore::Utils::FEX_PAGE_SIZE;
+#endif
   }
 
   uint64_t GetStackPointer() const override {
@@ -464,10 +470,7 @@ public:
 
   bool MapMemory(const std::function<void*(uint64_t, size_t)>& DoMMap) {
     bool LimitedSize = true;
-    auto AllocPageSize = sysconf(_SC_PAGESIZE);
-    if (AllocPageSize <= 0) {
-      AllocPageSize = FEXCore::Utils::FEX_PAGE_SIZE;
-    }
+    auto AllocPageSize = StackSize();
 
     if (LimitedSize) {
       DoMMap(0xe000'0000, AllocPageSize * 10);
@@ -486,13 +489,8 @@ public:
     }
 
     // Map in the memory region for the test file
-#ifndef _WIN32
     size_t Length = FEXCore::AlignUp(RawASMFile.size(), FEXCore::Utils::FEX_PAGE_SIZE);
     auto ASMPtr = DoMMap(Code_start_page, Length);
-#else
-    // Special magic DOS area that starts at 0x1'0000
-    auto ASMPtr = DoMMap(1, 0x110000 - 1);
-#endif
     LOGMAN_THROW_A_FMT((uint64_t)ASMPtr == Code_start_page, "Couldn't allocate code at expected page: 0x{:x} != 0x{:x}", (uint64_t)ASMPtr,
                        Code_start_page);
     memcpy(ASMPtr, RawASMFile.data(), RawASMFile.size());

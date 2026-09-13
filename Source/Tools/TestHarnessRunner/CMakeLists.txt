@@ -15,3 +15,11 @@ endif()
 target_include_directories(TestHarnessRunner PRIVATE ${CMAKE_BINARY_DIR}/generated)
 
 target_link_libraries(TestHarnessRunner PRIVATE ${LIBS})
+
+if (MINGW)
+  target_link_options(TestHarnessRunner PRIVATE -static -static-libgcc -static-libstdc++)
+  target_include_directories(TestHarnessRunner PRIVATE "${CMAKE_SOURCE_DIR}/Source/Windows/include/" "${CMAKE_SOURCE_DIR}/Source/Windows/")
+  # The executable uses the toolchain CRT. The extended native import library
+  # also exports CRT names and would bind errno and setjmp to a different CRT.
+  target_link_libraries(TestHarnessRunner PRIVATE CommonTools CommonWindows ntdll)
+endif()

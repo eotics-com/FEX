@@ -8,7 +8,12 @@ $end_info$
 
 #ifdef _WIN32
 #include "DummyHandlers.h"
-#include "ArchHelpers/WinContext.h"
+#include "Tools/LinuxEmulation/ArchHelpers/WinContext.h"
+#include "Windows/Common/Allocator.h"
+#include "Windows/Common/CPUFeatures.h"
+#include "Windows/Common/OvercommitTracker.h"
+#include "Windows/Common/JITGuardPage.h"
+#include "Windows/Common/CallRetStack.h"
 #else
 #include "LinuxSyscalls/LinuxAllocator.h"
 #include "LinuxSyscalls/Syscalls.h"
@@ -134,13 +139,21 @@ void RegisterLongJumpHandler(FEX::HLE::SignalDelegator* Handler) {
 }
 #else
 FEX::DummyHandlers::DummySignalDelegator* Handler;
+static std::unique_ptr<FEX::Windows::OvercommitTracker> OvercommitTracker;
 
 static void LongJumpHandler() {
   longjmp(LongJump, 1);
 }
 
 LONG WINAPI VectoredExceptionHandler(struct _EXCEPTION_POINTERS* ExceptionInfo) {
+  if (ExceptionInfo->ExceptionRecord->ExceptionCode == STATUS_ACCESS_VIOLATION &&
+      OvercommitTracker->HandleAccessViolation(ExceptionInfo->ExceptionRecord->ExceptionInformation[1])) {
+    return EXCEPTION_CONTINUE_EXECUTION;
+  }
   auto Thread = Handler->GetBackingTLSThread();
+  if (!Thread) {
+    return EXCEPTION_CONTINUE_SEARCH;
+  }
   PCONTEXT Context;
   Context = ExceptionInfo->ContextRecord;
 
@@ -152,11 +165,21 @@ LONG WINAPI VectoredExceptionHandler(struct _EXCEPTION_POINTERS* ExceptionInfo) 
       return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    const auto Result = FEXCore::ArchHelpers::Arm64::HandleUnalignedAccess(true, PC, FEX::ArchHelpers::Context::GetArmGPRs(Context));
+    const auto Result = FEXCore::ArchHelpers::Arm64::HandleUnalignedAccess(
+      Thread, FEXCore::ArchHelpers::Arm64::UnalignedHandlerType::HalfBarrier, PC, FEX::ArchHelpers::Context::GetArmGPRs(Context));
     FEX::ArchHelpers::Context::SetPc(Context, PC + Result.value_or(0));
     return Result ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
   }
   case STATUS_ACCESS_VIOLATION: {
+    if (FEX::Windows::CallRetStack::HandleAccessViolation(
+          Thread, ExceptionInfo->ExceptionRecord->ExceptionInformation[1], Context->X25)) {
+      return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (FEX::Windows::JITGuardPage::HandleJITGuardPage(
+          Thread, reinterpret_cast<void*>(ExceptionInfo->ExceptionRecord->ExceptionInformation[1]), Context->X,
+          reinterpret_cast<__uint128_t*>(Context->V), &Context->Pc)) {
+      return EXCEPTION_CONTINUE_EXECUTION;
+    }
     constexpr uint8_t HLT = 0xF4;
     if (reinterpret_cast<uint8_t*>(Thread->CurrentFrame->State.rip)[0] != HLT) {
       DidFault = true;
@@ -245,7 +268,21 @@ int main(int argc, char** argv, char** const envp) {
   bool SupportsAVX = false;
   FEXCore::Core::CPUState State;
 
+#ifndef _WIN32
   auto HostFeatures = FEX::FetchHostFeatures();
+#else
+  const auto NtDll = GetModuleHandleW(L"ntdll.dll");
+  const bool IsWine = !!GetProcAddress(NtDll, "wine_get_version");
+  // This native runner owns the complete guest CPU state. It is not constrained
+  // by WoW64's context ABI, which disables AVX even for our 64-bit test corpus.
+  auto HostFeatures = FEX::Windows::CPUFeatures::FetchHostFeatures(IsWine, FEXCore::HostFeatures::HostTypeEnum::Unknown);
+  LongJumpHandler::OvercommitTracker = std::make_unique<FEX::Windows::OvercommitTracker>(IsWine);
+  FEX::Windows::Allocator::SetupHooks(NtDll, [](const void* Ptr, size_t Size, bool Execute, bool Reserve) {
+    const auto Address = reinterpret_cast<uint64_t>(Ptr);
+    if (Reserve) LongJumpHandler::OvercommitTracker->MarkRange(Address, Size, Execute);
+    else LongJumpHandler::OvercommitTracker->UnmarkRange(Address, Size);
+  });
+#endif
   auto CTX = FEXCore::Context::Context::CreateNewContext(HostFeatures);
 
 #ifndef _WIN32
@@ -255,7 +292,7 @@ int main(int argc, char** argv, char** const envp) {
   //
   // Once they fix longjump, we can remove this.
   CTX->EnableExitOnHLT();
-  auto SignalDelegation = FEX::WindowsHandlers::CreateSignalDelegator();
+  auto SignalDelegation = FEX::DummyHandlers::CreateSignalDelegator();
 #endif
 
   // Skip any tests that the host doesn't support features for
@@ -302,7 +339,8 @@ int main(int argc, char** argv, char** const envp) {
 #endif
 
   if (TestUnsupported) {
-    return 0;
+    LogMan::Msg::IFmt("Skipped: unsupported host feature or operating system");
+    return 125;
   }
 
 #ifndef _WIN32
@@ -317,11 +355,18 @@ int main(int argc, char** argv, char** const envp) {
   };
 
 #else
-  auto SyscallHandler = FEX::WindowsHandlers::CreateSyscallHandler();
+  auto SyscallHandler = FEX::DummyHandlers::CreateSyscallHandler();
 
-  auto DoMMap = [](uint64_t Address, size_t Size) -> void* {
-    void* Result = FEXCore::Allocator::VirtualAlloc(reinterpret_cast<void*>(Address), Size, true);
-    LOGMAN_THROW_A_FMT(Result == reinterpret_cast<void*>(Address), "Map Memory mmap failed");
+  auto DoMmap = [](uint64_t Address, size_t Size) -> void* {
+    SYSTEM_INFO Info;
+    GetSystemInfo(&Info);
+    const uint64_t Base = Address & ~(static_cast<uint64_t>(Info.dwAllocationGranularity) - 1);
+    const size_t Length = FEXCore::AlignUp(Address + Size - Base, Info.dwAllocationGranularity);
+    // Reserve at allocation granularity, but commit only the requested pages.
+    // Committing the padding would hide out-of-bounds accesses in guard tests.
+    ::VirtualAlloc(reinterpret_cast<void*>(Base), Length, MEM_RESERVE, PAGE_NOACCESS);
+    void* Result = ::VirtualAlloc(reinterpret_cast<void*>(Address), Size, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    LOGMAN_THROW_A_FMT(Result && Result == reinterpret_cast<void*>(Address), "Map Memory allocation failed at {:#x}, size {:#x}, error {}", Address, Size, GetLastError());
     return Result;
   };
 #endif
@@ -343,37 +388,62 @@ int main(int argc, char** argv, char** const envp) {
       return -ENOEXEC;
     }
 
+#ifndef _WIN32
     auto ParentThread = SyscallHandler->TM.CreateThread(Loader.DefaultRIP(), 0);
     SyscallHandler->TM.TrackThread(ParentThread);
     SignalDelegation->RegisterTLSState(ParentThread);
+    auto Thread = ParentThread->Thread;
+#else
+    auto Thread = CTX->CreateThread(Loader.DefaultRIP(), 0);
+    if (!Thread) {
+      return 1;
+    }
+    SignalDelegation->RegisterTLSState(Thread);
+    FEX::Windows::CallRetStack::InitializeThread(Thread);
+    FEXCore::Core::CPUState::gdt_segment Gdt[32] {};
+    auto& GuestState = Thread->CurrentFrame->State;
+    GuestState.segment_arrays[FEXCore::Core::CPUState::SEGMENT_ARRAY_INDEX_GDT] = Gdt;
+    GuestState.segment_arrays[FEXCore::Core::CPUState::SEGMENT_ARRAY_INDEX_LDT] = Gdt;
+    GuestState.cs_idx = FEXCore::Core::CPUState::DEFAULT_USER_CS << 3;
+    auto Segment = FEXCore::Core::CPUState::GetSegmentFromIndex(GuestState, GuestState.cs_idx);
+    FEXCore::Core::CPUState::SetGDTLimit(Segment, 0xFFFFF);
+    Segment->L = Loader.Is64BitMode();
+    Segment->D = !Loader.Is64BitMode();
+#endif
 
-    if (!ParentThread) {
+    if (!Thread) {
       return 1;
     }
 
     int LongJumpVal = setjmp(LongJumpHandler::LongJump);
     if (!LongJumpVal) {
-      CTX->ExecuteThread(ParentThread->Thread);
+      CTX->ExecuteThread(Thread);
     }
 
     // Just re-use compare state. It also checks against the expected values in config.
-    memcpy(&State, &ParentThread->Thread->CurrentFrame->State, sizeof(State));
+    memcpy(&State, &Thread->CurrentFrame->State, sizeof(State));
 
     __uint128_t XMM_Low[FEXCore::Core::CPUState::NUM_XMMS];
     if (SupportsAVX) {
       ///< Reconstruct the XMM registers even if they are in split view, then remerge them.
       __uint128_t YMM_High[FEXCore::Core::CPUState::NUM_XMMS];
-      CTX->ReconstructXMMRegisters(ParentThread->Thread, XMM_Low, YMM_High);
+      CTX->ReconstructXMMRegisters(Thread, XMM_Low, YMM_High);
       for (size_t i = 0; i < FEXCore::Core::CPUState::NUM_XMMS; ++i) {
         memcpy(&State.xmm.avx.data[i][0], &XMM_Low[i], sizeof(__uint128_t));
         memcpy(&State.xmm.avx.data[i][2], &YMM_High[i], sizeof(__uint128_t));
       }
     } else {
-      CTX->ReconstructXMMRegisters(ParentThread->Thread, reinterpret_cast<__uint128_t*>(State.xmm.sse.data), nullptr);
+      CTX->ReconstructXMMRegisters(Thread, reinterpret_cast<__uint128_t*>(State.xmm.sse.data), nullptr);
     }
 
+#ifndef _WIN32
     SignalDelegation->UninstallTLSState(ParentThread);
     FEX::HLE::_SyscallHandler->TM.DestroyThread(ParentThread, true);
+#else
+    FEX::Windows::CallRetStack::DestroyThread(Thread);
+    SignalDelegation->UninstallTLSState(Thread);
+    CTX->DestroyThread(Thread);
+#endif
   }
 #ifndef _WIN32
   else {

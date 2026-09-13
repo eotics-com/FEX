@@ -37,3 +37,7 @@ elseif (ARCHITECTURE_arm64)
 endif()
 
 add_subdirectory(../Tools/FEXOfflineCompiler ${CMAKE_CURRENT_BINARY_DIR}/FEXOfflineCompiler)
+
+if (BUILD_TESTING AND ARCHITECTURE_arm64)
+  add_subdirectory(../Tools/TestHarnessRunner ${CMAKE_CURRENT_BINARY_DIR}/TestHarnessRunner)
+endif()
