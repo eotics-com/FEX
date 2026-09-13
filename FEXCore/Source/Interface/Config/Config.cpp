@@ -318,6 +318,7 @@ fextl::string FindContainer() {
 }
 
 fextl::string FindContainerPrefix() {
+#ifndef _WIN32
   // We only support pressure-vessel at the moment
   if (FHU::Filesystem::Exists(ContainerManager)) {
     fextl::string Manager {};
@@ -330,6 +331,7 @@ fextl::string FindContainerPrefix() {
       }
     }
   }
+#endif
   return {};
 }
 

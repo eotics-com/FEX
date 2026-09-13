@@ -366,23 +366,22 @@ void ParseWineSyscallNumbers(HMODULE NtDll) {
 }
 #ifdef __REACTOS__
 
-// Native ReactOS ARM64 stubs encode the service in `svc #id`. Older stubs use x8.
+// Native ReactOS ARM64 stubs are `svc #id; ret`. Older stubs are `movz x8, #id; svc #0; ret`.
 uint64_t ParseReactOSSyscallNumber(HMODULE NtDll, const char* Name) {
   const auto* Stub = reinterpret_cast<const uint32_t*>(GetProcAddress(NtDll, Name));
   if (!Stub) {
     return ~0ULL;
   }
 
-  if ((*Stub & 0xFFE0001F) == 0xD4000001) {
-    const uint64_t Service = (*Stub >> 5) & 0xFFFF;
+  if ((Stub[0] & 0xFFE0001F) == 0xD4000001 && Stub[1] == 0xD65F03C0) {
+    const uint64_t Service = (Stub[0] >> 5) & 0xFFFF;
     // 0xffff selects the dynamic x8 bridge, not a fixed service number.
     return Service == 0xFFFF ? ~0ULL : Service;
   }
 
-  if ((*Stub & 0xFFE0001F) != 0xD2800008) {
+  if ((Stub[0] & 0xFFE0001F) != 0xD2800008 || Stub[1] != 0xD4000001 || Stub[2] != 0xD65F03C0) {
     return ~0ULL;
   }
-
   return (*Stub >> 5) & 0xFFFF;
 }
 #endif
@@ -964,7 +963,7 @@ NTSTATUS ResetToConsistentState(EXCEPTION_RECORD* Exception, CONTEXT* GuestConte
     if (OvercommitTracker) {
       {
         ScopedCallbackDisable guard;
-        Cont = OvercommitTracker->HandleAccessViolation(FaultAddress);
+        Cont = OvercommitTracker->HandleAccessViolation(FaultAddress, Exception->ExceptionInformation[0]);
       }
       if (Cont) {
         NtContinueNative(NativeContext, false);

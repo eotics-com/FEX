@@ -17,10 +17,6 @@ private:
   FEXCore::IntervalList<uint64_t> OvercommitExecIntervals;
   std::shared_mutex OvercommitIntervalsMutex;
 
-  static void Commit(void* Address, size_t Size, bool Exec) {
-    VirtualAlloc(Address, Size, MEM_COMMIT, Exec ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE);
-  }
-
 public:
   OvercommitTracker(bool IsWine)
     : IsWine {IsWine} {}
@@ -36,7 +32,7 @@ public:
     OvercommitExecIntervals.Remove({Start, Start + Length});
   }
 
-  bool HandleAccessViolation(uint64_t FaultAddress) {
+  bool HandleAccessViolation(uint64_t FaultAddress, uint64_t AccessType) {
     std::shared_lock Lock {OvercommitIntervalsMutex};
     bool Exec = false;
     auto Query = OvercommitIntervals.Query(FaultAddress);
@@ -45,20 +41,29 @@ public:
       Exec = true;
     }
 
-    if (Query.Enclosed) {
-      if (IsWine) {
-        MEMORY_BASIC_INFORMATION Info;
-        NtQueryVirtualMemory(NtCurrentProcess(), reinterpret_cast<void*>(FaultAddress), MemoryBasicInformation, &Info, sizeof(Info), nullptr);
-        const auto CommitSize = reinterpret_cast<SIZE_T>(Info.BaseAddress) + Info.RegionSize - reinterpret_cast<SIZE_T>(Info.AllocationBase);
-        Commit(reinterpret_cast<void*>(Info.AllocationBase), CommitSize, Exec);
-      } else {
-        static constexpr size_t MaxFaultCommitSize = 1024 * 64;
-        const auto AlignedFaultAddress = reinterpret_cast<void*>(FaultAddress & FEXCore::Utils::FEX_PAGE_MASK);
-        Commit(AlignedFaultAddress, std::min(Query.Size, MaxFaultCommitSize), Exec);
-      }
-      return true;
+    if (!Query.Enclosed || (AccessType != 0 && AccessType != 1 && (AccessType != 8 || !Exec))) {
+      return false;
     }
-    return false;
+
+    MEMORY_BASIC_INFORMATION Info {};
+    if (NtQueryVirtualMemory(NtCurrentProcess(), reinterpret_cast<void*>(FaultAddress), MemoryBasicInformation, &Info, sizeof(Info), nullptr) < 0 || Info.Type != MEM_PRIVATE) {
+      return false;
+    }
+
+    const DWORD Protection = Exec ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
+    if (Info.State == MEM_COMMIT) {
+      return Info.Protect == Protection;
+    }
+    if (Info.State != MEM_RESERVE) {
+      return false;
+    }
+
+    const auto RegionStart = reinterpret_cast<uint64_t>(Info.BaseAddress);
+    const auto CommitStart = IsWine ? std::max(RegionStart, Query.Interval.Offset) : FaultAddress & FEXCore::Utils::FEX_PAGE_MASK;
+    const auto CommitEnd = std::min(RegionStart + Info.RegionSize, Query.Interval.End);
+    static constexpr uint64_t MaxFaultCommitSize = 1024 * 64;
+    const auto CommitSize = IsWine ? CommitEnd - CommitStart : std::min(CommitEnd - CommitStart, MaxFaultCommitSize);
+    return VirtualAlloc(reinterpret_cast<void*>(CommitStart), CommitSize, MEM_COMMIT, Protection) != nullptr;
   }
 };
 } // namespace FEX::Windows
