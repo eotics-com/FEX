@@ -698,7 +698,7 @@ public:
 };
 } // namespace Exception
 
-extern "C" void SyncThreadContext(CONTEXT* Context) {
+extern "C" void SyncThreadContext(CONTEXT* Context, bool FullContext) {
   ProcessPendingCrossProcessEmulatorWork();
   auto* Thread = GetCPUArea().ThreadState();
   // All other EFlags bits are lost when converting to/from an ARM64EC context, so merge them in from the current JIT state.
@@ -707,8 +707,10 @@ extern "C" void SyncThreadContext(CONTEXT* Context) {
                                                (1U << FEXCore::X86State::RFLAG_ZF_RAW_LOC) | (1U << FEXCore::X86State::RFLAG_SF_RAW_LOC) |
                                                (1U << FEXCore::X86State::RFLAG_TF_RAW_LOC)};
 
-  uint32_t StateEFlags = CTX->ReconstructCompactedEFLAGS(Thread, false, nullptr, 0);
-  Context->EFlags = (Context->EFlags & ECValidEFlagsMask) | (StateEFlags & ~ECValidEFlagsMask);
+  if (!FullContext) {
+    uint32_t StateEFlags = CTX->ReconstructCompactedEFLAGS(Thread, false, nullptr, 0);
+    Context->EFlags = (Context->EFlags & ECValidEFlagsMask) | (StateEFlags & ~ECValidEFlagsMask);
+  }
   Exception::LoadStateFromECContext(Thread, *Context);
 }
 

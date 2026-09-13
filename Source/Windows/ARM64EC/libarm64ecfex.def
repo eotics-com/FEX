@@ -9,6 +9,7 @@ EXPORTS
   RetToEntryThunk DATA
   ExitToX64 DATA
   BeginSimulation DATA
+  BeginSimulationFromContext DATA
   FlushInstructionCacheHeavy
   NotifyMapViewOfSection
   NotifyMemoryAlloc

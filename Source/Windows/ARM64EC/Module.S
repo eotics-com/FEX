@@ -41,6 +41,14 @@ enter_jit:
   // Invoked by KiUserEmulationDispatcher after e.g. an NtContinue to x86 code
 .global BeginSimulation
 BeginSimulation:
+  mov w1, #0 // Flags converted from ARM64 contain only NZCV and SS.
+  b begin_simulation_common
+
+.global BeginSimulationFromContext
+BeginSimulationFromContext:
+  mov w1, #1 // An explicit x64 CONTEXT carries the complete EFLAGS value.
+
+begin_simulation_common:
   ldr x17, [x18, #0x1788] // TEB->ChpeV2CpuAreaInfo
   ldr x16, [x17, #0x8] // ChpeV2CpuAreaInfo->EmulatorStackBase
   mov sp, x16
