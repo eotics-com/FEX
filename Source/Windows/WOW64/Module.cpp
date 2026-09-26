@@ -241,6 +241,14 @@ void LoadStateFromWowContext(FEXCore::Core::InternalThreadState* Thread, uint64_
   State.flags[FEXCore::X86State::X87FLAG_C2_LOC] = (XSave->StatusWord >> 10) & 1;
   State.flags[FEXCore::X86State::X87FLAG_C3_LOC] = (XSave->StatusWord >> 14) & 1;
   State.flags[FEXCore::X86State::X87FLAG_TOP_LOC] = (XSave->StatusWord >> 11) & 0b111;
+  State.flags[FEXCore::X86State::X87FLAG_DE_LOC] = (XSave->StatusWord >> 1) & 1;
+  State.flags[FEXCore::X86State::X87FLAG_ZE_LOC] = (XSave->StatusWord >> 2) & 1;
+  State.flags[FEXCore::X86State::X87FLAG_OE_LOC] = (XSave->StatusWord >> 3) & 1;
+  State.flags[FEXCore::X86State::X87FLAG_UE_LOC] = (XSave->StatusWord >> 4) & 1;
+  State.flags[FEXCore::X86State::X87FLAG_PE_LOC] = (XSave->StatusWord >> 5) & 1;
+  State.flags[FEXCore::X86State::X87FLAG_SF_LOC] = (XSave->StatusWord >> 6) & 1;
+  State.flags[FEXCore::X86State::X87FLAG_ES_LOC] = (XSave->StatusWord >> 7) & 1;
+  State.flags[FEXCore::X86State::X87FLAG_B_LOC] = (XSave->StatusWord >> 15) & 1;
   State.AbridgedFTW = XSave->TagWord;
 }
 
@@ -278,7 +286,11 @@ void StoreWowContextFromState(FEXCore::Core::InternalThreadState* Thread, WOW64_
   XSave->ControlWord = State.FCW;
   XSave->StatusWord = (State.flags[FEXCore::X86State::X87FLAG_TOP_LOC] << 11) | (State.flags[FEXCore::X86State::X87FLAG_C0_LOC] << 8) |
                       (State.flags[FEXCore::X86State::X87FLAG_C1_LOC] << 9) | (State.flags[FEXCore::X86State::X87FLAG_C2_LOC] << 10) |
-                      (State.flags[FEXCore::X86State::X87FLAG_C3_LOC] << 14) | State.flags[FEXCore::X86State::X87FLAG_IE_LOC];
+                      (State.flags[FEXCore::X86State::X87FLAG_C3_LOC] << 14) | State.flags[FEXCore::X86State::X87FLAG_IE_LOC] |
+                      (State.flags[FEXCore::X86State::X87FLAG_DE_LOC] << 1) | (State.flags[FEXCore::X86State::X87FLAG_ZE_LOC] << 2) |
+                      (State.flags[FEXCore::X86State::X87FLAG_OE_LOC] << 3) | (State.flags[FEXCore::X86State::X87FLAG_UE_LOC] << 4) |
+                      (State.flags[FEXCore::X86State::X87FLAG_PE_LOC] << 5) | (State.flags[FEXCore::X86State::X87FLAG_SF_LOC] << 6) |
+                      (State.flags[FEXCore::X86State::X87FLAG_ES_LOC] << 7) | (State.flags[FEXCore::X86State::X87FLAG_B_LOC] << 15);
   XSave->TagWord = State.AbridgedFTW;
 
   Context->FloatSave.ControlWord = XSave->ControlWord;

@@ -3141,7 +3141,7 @@ void OpDispatchBuilder::SaveSSEState(Ref MemBase) {
 
 void OpDispatchBuilder::SaveMXCSRState(Ref MemBase) {
   // Store MXCSR and the mask for all bits.
-  _StoreMemPairGPR(OpSize::i32Bit, GetMXCSR(), Constant(0xFFC0), MemBase, 24);
+  _StoreMemPairGPR(OpSize::i32Bit, GetMXCSR(), Constant(0xFFFF), MemBase, 24);
 }
 
 void OpDispatchBuilder::SaveAVXState(Ref MemBase) {
@@ -3157,9 +3157,7 @@ void OpDispatchBuilder::SaveAVXState(Ref MemBase) {
 
 Ref OpDispatchBuilder::GetMXCSR() {
   Ref MXCSR = _LoadContextGPR(OpSize::i32Bit, offsetof(FEXCore::Core::CPUState, mxcsr));
-  // Mask out unsupported bits
-  // Keeps FZ, RC, exception masks, and DAZ
-  MXCSR = _And(OpSize::i32Bit, MXCSR, Constant(0xFFC0));
+  MXCSR = _And(OpSize::i32Bit, MXCSR, Constant(0xFFFF));
   return MXCSR;
 }
 
@@ -3276,8 +3274,7 @@ void OpDispatchBuilder::RestoreSSEState(Ref MemBase) {
 }
 
 void OpDispatchBuilder::RestoreMXCSRState(Ref MXCSR) {
-  // Mask out unsupported bits
-  MXCSR = _And(OpSize::i32Bit, MXCSR, Constant(0xFFC0));
+  MXCSR = _And(OpSize::i32Bit, MXCSR, Constant(0xFFFF));
 
   _StoreContextGPR(OpSize::i32Bit, MXCSR, offsetof(FEXCore::Core::CPUState, mxcsr));
   // We only support the rounding mode and FTZ bit being set

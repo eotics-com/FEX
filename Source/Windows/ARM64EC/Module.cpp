@@ -514,7 +514,16 @@ static void LoadStateFromECContext(FEXCore::Core::InternalThreadState* Thread, C
     State.flags[FEXCore::X86State::X87FLAG_C2_LOC] = (Context.FltSave.StatusWord >> 10) & 1;
     State.flags[FEXCore::X86State::X87FLAG_C3_LOC] = (Context.FltSave.StatusWord >> 14) & 1;
     State.flags[FEXCore::X86State::X87FLAG_TOP_LOC] = (Context.FltSave.StatusWord >> 11) & 0b111;
+    State.flags[FEXCore::X86State::X87FLAG_DE_LOC] = (Context.FltSave.StatusWord >> 1) & 1;
+    State.flags[FEXCore::X86State::X87FLAG_ZE_LOC] = (Context.FltSave.StatusWord >> 2) & 1;
+    State.flags[FEXCore::X86State::X87FLAG_OE_LOC] = (Context.FltSave.StatusWord >> 3) & 1;
+    State.flags[FEXCore::X86State::X87FLAG_UE_LOC] = (Context.FltSave.StatusWord >> 4) & 1;
+    State.flags[FEXCore::X86State::X87FLAG_PE_LOC] = (Context.FltSave.StatusWord >> 5) & 1;
+    State.flags[FEXCore::X86State::X87FLAG_SF_LOC] = (Context.FltSave.StatusWord >> 6) & 1;
+    State.flags[FEXCore::X86State::X87FLAG_ES_LOC] = (Context.FltSave.StatusWord >> 7) & 1;
+    State.flags[FEXCore::X86State::X87FLAG_B_LOC] = (Context.FltSave.StatusWord >> 15) & 1;
     State.AbridgedFTW = Context.FltSave.TagWord;
+    State.mxcsr = Context.MxCsr & 0xFFFF;
   }
 }
 

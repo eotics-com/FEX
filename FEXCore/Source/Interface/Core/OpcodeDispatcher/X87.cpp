@@ -433,6 +433,14 @@ Ref OpDispatchBuilder::ReconstructX87StateFromFSW_Helper(Ref FSW) {
   SetRFLAG<FEXCore::X86State::X87FLAG_C2_LOC>(C2);
   SetRFLAG<FEXCore::X86State::X87FLAG_C3_LOC>(C3);
   SetRFLAG<FEXCore::X86State::X87FLAG_IE_LOC>(IE);
+  SetRFLAG<FEXCore::X86State::X87FLAG_DE_LOC>(_Bfe(OpSize::i32Bit, 1, 1, FSW));
+  SetRFLAG<FEXCore::X86State::X87FLAG_ZE_LOC>(_Bfe(OpSize::i32Bit, 1, 2, FSW));
+  SetRFLAG<FEXCore::X86State::X87FLAG_OE_LOC>(_Bfe(OpSize::i32Bit, 1, 3, FSW));
+  SetRFLAG<FEXCore::X86State::X87FLAG_UE_LOC>(_Bfe(OpSize::i32Bit, 1, 4, FSW));
+  SetRFLAG<FEXCore::X86State::X87FLAG_PE_LOC>(_Bfe(OpSize::i32Bit, 1, 5, FSW));
+  SetRFLAG<FEXCore::X86State::X87FLAG_SF_LOC>(_Bfe(OpSize::i32Bit, 1, 6, FSW));
+  SetRFLAG<FEXCore::X86State::X87FLAG_ES_LOC>(_Bfe(OpSize::i32Bit, 1, 7, FSW));
+  SetRFLAG<FEXCore::X86State::X87FLAG_B_LOC>(_Bfe(OpSize::i32Bit, 1, 15, FSW));
   return Top;
 }
 
@@ -753,6 +761,15 @@ Ref OpDispatchBuilder::ReconstructFSW_Helper(Ref T) {
   auto IE = GetRFLAG(FEXCore::X86State::X87FLAG_IE_LOC);
   FSW = _Or(OpSize::i64Bit, FSW, IE);
 
+  FSW = _Orlshl(OpSize::i64Bit, FSW, GetRFLAG(FEXCore::X86State::X87FLAG_DE_LOC), 1);
+  FSW = _Orlshl(OpSize::i64Bit, FSW, GetRFLAG(FEXCore::X86State::X87FLAG_ZE_LOC), 2);
+  FSW = _Orlshl(OpSize::i64Bit, FSW, GetRFLAG(FEXCore::X86State::X87FLAG_OE_LOC), 3);
+  FSW = _Orlshl(OpSize::i64Bit, FSW, GetRFLAG(FEXCore::X86State::X87FLAG_UE_LOC), 4);
+  FSW = _Orlshl(OpSize::i64Bit, FSW, GetRFLAG(FEXCore::X86State::X87FLAG_PE_LOC), 5);
+  FSW = _Orlshl(OpSize::i64Bit, FSW, GetRFLAG(FEXCore::X86State::X87FLAG_SF_LOC), 6);
+  FSW = _Orlshl(OpSize::i64Bit, FSW, GetRFLAG(FEXCore::X86State::X87FLAG_ES_LOC), 7);
+  FSW = _Orlshl(OpSize::i64Bit, FSW, GetRFLAG(FEXCore::X86State::X87FLAG_B_LOC), 15);
+
   return FSW;
 }
 
@@ -767,7 +784,16 @@ void OpDispatchBuilder::X87FNSTSW(OpcodeArgs) {
 
 void OpDispatchBuilder::FNCLEX(OpcodeArgs) {
   // Clear the exception flag bit
-  SetRFLAG<FEXCore::X86State::X87FLAG_IE_LOC>(_Constant(0));
+  auto Zero = _Constant(0);
+  SetRFLAG<FEXCore::X86State::X87FLAG_IE_LOC>(Zero);
+  SetRFLAG<FEXCore::X86State::X87FLAG_DE_LOC>(Zero);
+  SetRFLAG<FEXCore::X86State::X87FLAG_ZE_LOC>(Zero);
+  SetRFLAG<FEXCore::X86State::X87FLAG_OE_LOC>(Zero);
+  SetRFLAG<FEXCore::X86State::X87FLAG_UE_LOC>(Zero);
+  SetRFLAG<FEXCore::X86State::X87FLAG_PE_LOC>(Zero);
+  SetRFLAG<FEXCore::X86State::X87FLAG_SF_LOC>(Zero);
+  SetRFLAG<FEXCore::X86State::X87FLAG_ES_LOC>(Zero);
+  SetRFLAG<FEXCore::X86State::X87FLAG_B_LOC>(Zero);
 }
 
 void OpDispatchBuilder::FNINIT(OpcodeArgs) {
@@ -796,6 +822,14 @@ void OpDispatchBuilder::FNINIT(OpcodeArgs) {
   SetRFLAG<FEXCore::X86State::X87FLAG_C2_LOC>(Zero);
   SetRFLAG<FEXCore::X86State::X87FLAG_C3_LOC>(Zero);
   SetRFLAG<FEXCore::X86State::X87FLAG_IE_LOC>(Zero);
+  SetRFLAG<FEXCore::X86State::X87FLAG_DE_LOC>(Zero);
+  SetRFLAG<FEXCore::X86State::X87FLAG_ZE_LOC>(Zero);
+  SetRFLAG<FEXCore::X86State::X87FLAG_OE_LOC>(Zero);
+  SetRFLAG<FEXCore::X86State::X87FLAG_UE_LOC>(Zero);
+  SetRFLAG<FEXCore::X86State::X87FLAG_PE_LOC>(Zero);
+  SetRFLAG<FEXCore::X86State::X87FLAG_SF_LOC>(Zero);
+  SetRFLAG<FEXCore::X86State::X87FLAG_ES_LOC>(Zero);
+  SetRFLAG<FEXCore::X86State::X87FLAG_B_LOC>(Zero);
 }
 
 void OpDispatchBuilder::X87FFREE(OpcodeArgs) {
